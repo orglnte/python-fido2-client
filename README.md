@@ -36,3 +36,4 @@ TODO
 + error handling
 + define details of the state machine for interactive and programmatical use cases
 + tests
++ support for credential registration
