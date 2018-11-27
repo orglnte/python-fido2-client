@@ -3,7 +3,9 @@ import base64
 import getpass
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+import base64
 
+import simplejson
 import requests
 import cbor2 as cbor
 from fido2.hid import CtapHidDevice
@@ -101,12 +103,17 @@ class Fido2HttpClient(object):
         self.log('ASSERTION: ', assertion)
         self.log('CLIENT DATA: ', client_data)
 
+        user_data = {}
+        if append_to_data:
+            user_data = append_to_data
+        user_data = base64.b64encode(simplejson.dumps(user_data).encode('utf-8'))
+
         data = {
             'credentialId': assertion.credential['id'],
             'authenticatorData': assertion.auth_data,
             'clientDataJSON': client_data,
             'signature': assertion.signature,
-            'user_data': append_to_data,
+            'user_data': user_data,
         }
         body = cbor.dumps(data)
         headers = {'content-type': 'application/cbor'}
