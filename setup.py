@@ -5,7 +5,7 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
     name="fido2client",
-    version="0.10.3",
+    version="0.10.5",
     author="origliante",
     author_email="please.visit.github@page.nowhere",
     description="WebAuthn API FIDO2 client",
