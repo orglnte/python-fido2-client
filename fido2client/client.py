@@ -59,7 +59,6 @@ class Fido2HttpClient(object):
 
     def say_not_authenticated(self, data):
         print('Not Authenticated')
-        print(data)
 
     def init_dev(self):
         self.dev = next(CtapHidDevice.list_devices(), None)
@@ -92,12 +91,17 @@ class Fido2HttpClient(object):
 
         # get Assertion
         self.ask_for_interaction()
-        assertions, client_data = fido2_client.get_assertion(
-            pubkey['rpId'],
-            challenge,
-            allow_list)
-            #TODO
-            #pin=getpass('Please enter PIN:'))
+        try:
+            assertions, client_data = fido2_client.get_assertion(
+                pubkey['rpId'],
+                challenge,
+                allow_list)
+        except ValueError:
+            assertions, client_data = fido2_client.get_assertion(
+                pubkey['rpId'],
+                challenge,
+                allow_list,
+                pin=getpass.getpass('Please enter PIN:'))
 
         assertion = assertions[0]
         self.log('ASSERTION: ', assertion)

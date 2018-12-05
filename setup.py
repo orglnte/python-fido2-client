@@ -5,7 +5,7 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
     name="fido2client",
-    version="0.10.1",
+    version="0.10.3",
     author="origliante",
     author_email="please.visit.github@page.nowhere",
     description="WebAuthn API FIDO2 client",
@@ -13,7 +13,7 @@ setuptools.setup(
     long_description_content_type="text/markdown",
     url="https://github.com/origliante/python-fido2-client",
     packages=setuptools.find_packages(),
-    python_requires='>=3.6',
+    python_requires='>=3.5',
     install_requires=[
         'fido2',
         'cbor2',
