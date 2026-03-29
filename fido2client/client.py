@@ -1,148 +1,251 @@
-import urllib
+from __future__ import annotations
+
 import base64
 import getpass
-import urllib3
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-import base64
+import json
+import logging
+import urllib.parse
+from typing import Any, Optional
 
-import simplejson
-import requests
 import cbor2 as cbor
-from fido2.hid import CtapHidDevice
+import requests
 from fido2.client import Fido2Client
+from fido2.hid import CtapHidDevice
+
+from .exceptions import (
+    FidoAuthenticationError,
+    FidoDeviceNotFoundError,
+    FidoServerError,
+)
+
+logger = logging.getLogger(__name__)
 
 
+class Fido2HttpClient:
+    """FIDO2 WebAuthn HTTP client.
 
-class Fido2HttpClient(object):
-    session = None
-    server = None
-    dev = None
-    ssl_verify = True
-    begin_url = None
-    complete_url = None
-    is_authenticated = False
-    verbose = False
+    Orchestrates the FIDO2 authentication ceremony against a WebAuthn server:
+    sends the begin request, retrieves an assertion from the connected
+    authenticator device, then sends the completion request.
 
-    def authenticate_to(self,
-            server, begin_endpoint, complete_endpoint,
-            session=None, append_to_data=None, append_to_headers=None):
+    Supports use as a context manager to ensure the HTTP session is closed:
+
+        with Fido2HttpClient() as client:
+            client.authenticate_to(server, begin_path, complete_path)
+    """
+
+    def __init__(
+        self,
+        ssl_verify: bool = True,
+        verbose: bool = False,
+        timeout: int = 30,
+    ) -> None:
+        """
+        Args:
+            ssl_verify: Verify TLS certificates. Always True in production;
+                set False only for local development with self-signed certs.
+            verbose: If True, attach a StreamHandler to the fido2client logger
+                at DEBUG level. Equivalent to configuring logging externally.
+            timeout: HTTP request timeout in seconds.
+        """
+        self.ssl_verify = ssl_verify
+        self.timeout = timeout
+        self.is_authenticated: bool = False
+
+        self.server: Optional[str] = None
+        self.dev: Optional[CtapHidDevice] = None
+        self.session: Optional[requests.Session] = None
+        self._begin_data: Optional[dict[str, Any]] = None
+        self._last_response: Optional[requests.Response] = None
+
+        if verbose:
+            _handler = logging.StreamHandler()
+            _handler.setLevel(logging.DEBUG)
+            logger.addHandler(_handler)
+            logger.setLevel(logging.DEBUG)
+
+    def __enter__(self) -> Fido2HttpClient:
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        if self.session is not None:
+            self.session.close()
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def authenticate_to(
+        self,
+        server: str,
+        begin_endpoint: str,
+        complete_endpoint: str,
+        session: Optional[requests.Session] = None,
+        extra_data: Optional[dict[str, Any]] = None,
+        extra_headers: Optional[dict[str, str]] = None,
+    ) -> bool:
+        """Perform a FIDO2 authentication ceremony against a WebAuthn server.
+
+        Args:
+            server: Base URL of the authentication server
+                (e.g. ``'https://example.com'``).
+            begin_endpoint: Path to the begin endpoint
+                (e.g. ``'/api/authenticate/begin'``).
+            complete_endpoint: Path to the complete endpoint
+                (e.g. ``'/api/authenticate/complete'``).
+            session: Optional :class:`requests.Session` to reuse.
+                A new session is created if omitted.
+            extra_data: Optional dict merged into the completion request body.
+            extra_headers: Optional HTTP headers added to every request.
+
+        Returns:
+            ``True`` if the server confirmed authentication, ``False`` otherwise.
+
+        Raises:
+            FidoDeviceNotFoundError: No FIDO2 device is connected.
+            FidoServerError: The server returned an unreadable or unexpected response.
+            requests.exceptions.RequestException: A network-level failure occurred.
+        """
         self.server = server
-        self.init_dev()
+
+        if session is not None:
+            self.session = session
+        if self.session is None:
+            self.session = requests.Session()
+
+        self._init_dev()
+
         begin_url = urllib.parse.urljoin(server, begin_endpoint)
         complete_url = urllib.parse.urljoin(server, complete_endpoint)
 
-        if self.dev:
-            # assign or create session
-            if session:
-                self.session = session
-            if not self.session:
-                self.session = requests.session()
+        self._begin(begin_url, extra_headers=extra_headers)
+        return self._complete(complete_url, extra_data=extra_data, extra_headers=extra_headers)
 
-            self.begin(begin_url,
-                append_to_headers=append_to_headers)
-            self.complete(complete_url,
-                append_to_data=append_to_data,
-                append_to_headers=append_to_headers)
-        return self.is_authenticated
-
-    def log(self, *args):
-        if self.verbose: print(args)
-
-    def ask_for_interaction(self):
-        print('Touch your authenticator device...')
-
-    def say_no_device_found(self):
-        print('No FIDO device found')
-
-    def say_authenticated(self):
-        print('Authenticated')
-
-    def say_not_authenticated(self, data):
-        print('Not Authenticated')
-
-    def init_dev(self):
-        self.dev = next(CtapHidDevice.list_devices(), None)
-        if not self.dev:
-            self.say_no_device_found()            
-
-    def begin(self, begin_url, append_to_headers=None):
-        headers = {}
-        if append_to_headers:
-            for k in append_to_headers:
-                headers[k] = append_to_headers[k]
-
-        r = self.session.post(begin_url,
-            verify=self.ssl_verify,
-            headers=headers)
-
-        self.begin_data = cbor.loads(r.content)
-        self.log('BEGIN RESPONSE: ', self.begin_data)
-
-    def complete(self, complete_url, append_to_data=None, append_to_headers=None):
-        fido2_client = Fido2Client(self.dev, self.server)
-
-        pubkey = self.begin_data['publicKey']
-        challenge = base64.b64encode(pubkey['challenge'])
-        challenge = challenge.decode('utf-8')
-        allow_list = [{
-            'type': 'public-key',
-            'id': pubkey['allowCredentials'][0]['id'],
-        }]
-
-        # get Assertion
-        self.ask_for_interaction()
-        try:
-            assertions, client_data = fido2_client.get_assertion(
-                pubkey['rpId'],
-                challenge,
-                allow_list)
-        except ValueError:
-            assertions, client_data = fido2_client.get_assertion(
-                pubkey['rpId'],
-                challenge,
-                allow_list,
-                pin=getpass.getpass('Please enter PIN:'))
-
-        assertion = assertions[0]
-        self.log('ASSERTION: ', assertion)
-        self.log('CLIENT DATA: ', client_data)
-
-        user_data = {}
-        if append_to_data:
-            user_data = append_to_data
-        user_data = base64.b64encode(simplejson.dumps(user_data).encode('utf-8'))
-
-        data = {
-            'credentialId': assertion.credential['id'],
-            'authenticatorData': assertion.auth_data,
-            'clientDataJSON': client_data,
-            'signature': assertion.signature,
-            'user_data': user_data,
-        }
-        body = cbor.dumps(data)
-        headers = {'content-type': 'application/cbor'}
-        if append_to_headers:
-            for k in append_to_headers:
-                headers[k] = append_to_headers[k]
-
-        r = self.session.post(complete_url,
-            verify=self.ssl_verify,
-            headers=headers,
-            data=body
-        )
-        self._last_response = r
-
-        data = cbor.loads(r.content)
-        self.log('COMPLETE RESPONSE: ', data)
-        if 'status' in data and data['status'] == 'OK':
-            self.is_authenticated = True
-        else:
-            self.is_authenticated = False
-
-        if self.is_authenticated: self.say_authenticated()
-        else: self.say_not_authenticated(data)
-        return self.is_authenticated
-
-    def get_last_response(self):
+    def get_last_response(self) -> Optional[requests.Response]:
+        """Return the raw HTTP response from the last completion request, or None."""
         return self._last_response
 
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _init_dev(self) -> None:
+        self.dev = next(CtapHidDevice.list_devices(), None)
+        if not self.dev:
+            raise FidoDeviceNotFoundError(
+                "No FIDO2 device found. Connect your authenticator and try again."
+            )
+
+    def _begin(
+        self,
+        begin_url: str,
+        extra_headers: Optional[dict[str, str]] = None,
+    ) -> None:
+        headers: dict[str, str] = dict(extra_headers) if extra_headers else {}
+        try:
+            r = self.session.post(
+                begin_url, verify=self.ssl_verify, headers=headers, timeout=self.timeout
+            )
+            r.raise_for_status()
+        except requests.exceptions.RequestException as exc:
+            raise FidoServerError(f"Begin request failed: {exc}") from exc
+
+        try:
+            self._begin_data = cbor.loads(r.content)
+        except Exception as exc:
+            raise FidoServerError(f"Could not decode CBOR begin response: {exc}") from exc
+
+        logger.debug("BEGIN RESPONSE: %s", self._begin_data)
+
+    def _complete(
+        self,
+        complete_url: str,
+        extra_data: Optional[dict[str, Any]] = None,
+        extra_headers: Optional[dict[str, str]] = None,
+    ) -> bool:
+        pubkey = self._validate_begin_data()
+
+        fido2_client = Fido2Client(self.dev, self.server)
+        challenge = base64.b64encode(pubkey["challenge"]).decode("utf-8")
+        allow_list = [{"type": "public-key", "id": pubkey["allowCredentials"][0]["id"]}]
+
+        print("Touch your authenticator device...")
+        try:
+            assertions, client_data = fido2_client.get_assertion(
+                pubkey["rpId"], challenge, allow_list
+            )
+        except ValueError:
+            assertions, client_data = fido2_client.get_assertion(
+                pubkey["rpId"],
+                challenge,
+                allow_list,
+                pin=getpass.getpass("Please enter PIN: "),
+            )
+
+        assertion = assertions[0]
+        logger.debug("ASSERTION: %s", assertion)
+        logger.debug("CLIENT DATA: %s", client_data)
+
+        user_data = base64.b64encode(json.dumps(extra_data or {}).encode("utf-8"))
+        body = cbor.dumps(
+            {
+                "credentialId": assertion.credential["id"],
+                "authenticatorData": assertion.auth_data,
+                "clientDataJSON": client_data,
+                "signature": assertion.signature,
+                "user_data": user_data,
+            }
+        )
+
+        headers: dict[str, str] = {"content-type": "application/cbor"}
+        if extra_headers:
+            headers.update(extra_headers)
+
+        try:
+            r = self.session.post(
+                complete_url,
+                verify=self.ssl_verify,
+                headers=headers,
+                data=body,
+                timeout=self.timeout,
+            )
+            r.raise_for_status()
+        except requests.exceptions.RequestException as exc:
+            raise FidoServerError(f"Complete request failed: {exc}") from exc
+
+        self._last_response = r
+
+        try:
+            data = cbor.loads(r.content)
+        except Exception as exc:
+            raise FidoServerError(f"Could not decode CBOR complete response: {exc}") from exc
+
+        logger.debug("COMPLETE RESPONSE: %s", data)
+
+        self.is_authenticated = data.get("status") == "OK"
+        if self.is_authenticated:
+            logger.info("Authentication succeeded.")
+        else:
+            logger.warning("Authentication failed. Server response: %s", data)
+
+        return self.is_authenticated
+
+    def _validate_begin_data(self) -> dict[str, Any]:
+        if self._begin_data is None:
+            raise FidoAuthenticationError("_begin() must be called before _complete().")
+
+        pubkey = self._begin_data.get("publicKey")
+        if not pubkey:
+            raise FidoServerError("Missing 'publicKey' in server response.")
+
+        for field in ("rpId", "challenge"):
+            if field not in pubkey:
+                raise FidoServerError(f"Missing required field '{field}' in server response.")
+
+        creds = pubkey.get("allowCredentials")
+        if not creds:
+            raise FidoServerError(
+                "Server returned empty or missing 'allowCredentials'."
+            )
+
+        return pubkey
