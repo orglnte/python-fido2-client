@@ -1,5 +1,9 @@
 # python-fido2-client
 
+[![Tests](https://github.com/origliante/python-fido2-client/actions/workflows/python-package.yml/badge.svg)](https://github.com/origliante/python-fido2-client/actions/workflows/python-package.yml)
+[![Publish](https://github.com/origliante/python-fido2-client/actions/workflows/python-publish.yml/badge.svg)](https://github.com/origliante/python-fido2-client/actions/workflows/python-publish.yml)
+[![PyPI](https://img.shields.io/pypi/v/fido2client)](https://pypi.org/project/fido2client/)
+
 WebAuthn API FIDO2 client implementation in Python.
 
 A Python library for authenticating against WebAuthn/FIDO2 servers. Handles FIDO2 device discovery, assertion retrieval over CTAP HID, and server communication.
