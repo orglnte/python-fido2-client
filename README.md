@@ -1,39 +1,183 @@
 # python-fido2-client
-WebAuthn API FIDO2 client implementation in Python
 
-Simple implementation in Python, slightly tested against https://github.com/Yubico/python-fido2/tree/master/examples/server.
-As of today, it is instrumented for interactivity. Tested on python3.6, requires fido2, cbor2, requests.
+WebAuthn API FIDO2 client implementation in Python.
 
-Calling this example:
+A Python library for authenticating against WebAuthn/FIDO2 servers. Handles FIDO2 device discovery, assertion retrieval over CTAP HID, and server communication.
+
+Tested against the [python-fido2 server example](https://github.com/Yubico/python-fido2/tree/master/examples/server).
+
+## Requirements
+
+- Python 3.9+
+- A FIDO2-compatible USB authenticator (e.g. YubiKey)
+- A WebAuthn server implementing the begin/complete authentication flow using CBOR encoding
+
+## Installation
+
+```bash
+pip install fido2client
+```
+
+## Quick start
+
 ```python
 import fido2client
-c = fido2client.Fido2HttpClient()
-c.ssl_verify = False
-c.verbose = True
 
-c.authenticate_to(
-  'https://localhost:5000',
-  '/api/authenticate/begin',
-  '/api/authenticate/complete',
+with fido2client.Fido2HttpClient() as client:
+    authenticated = client.authenticate_to(
+        'https://your-server.com',
+        '/api/authenticate/begin',
+        '/api/authenticate/complete',
+    )
+    if authenticated:
+        print('Authenticated!')
+```
+
+## Usage
+
+### Basic authentication
+
+```python
+from fido2client import Fido2HttpClient
+
+client = Fido2HttpClient()
+result = client.authenticate_to(
+    'https://example.com',
+    '/api/authenticate/begin',
+    '/api/authenticate/complete',
 )
 ```
 
-Will lead to:
-```
-$ python test.py
-('BEGIN RESPONSE: ', {'publicKey': {'rpId': 'localhost', 'timeout': 30000, 'challenge': b'\x1d\n\xa0!?  \x8a\xcd\xca\x1a\xdb\xa2}\xe2\xf7\x9e\x8dyvC{\x83\x08\xa2>o;\x17\x11\x1e\x945\xb3', 'allowCredentials': [{'id': b'\x1e.\xd8c\xcd*\x8a\xebI!\t\x9d\x9d\x99-\xb6\x7f\xfbf\xf5\xa0\xab\xa4@\xbc\xe9\x0e\xf6\xf2^\xbaG:\x07\xdcef\xef\xcf\x0e\xf6\xda\xa9\xbf\x06\x84O\xfb\x00e\x88\x7f\xa7\x11\x00g\x90`\xdf\x85\x97\x95Rf', 'type': 'public-key'}], 'userVerification': 'preferred'}})
+### With custom headers or extra data
 
-Touch your authenticator device...
-
-('ASSERTION: ', AssertionResponse(credential: {'id': b'\x1e.\xd8c\xcd*\x8a\xebI!\t\x9d\x9d\x99-\xb6\x7f\xfbf\xf5\xa0\xab\xa4@\xbc\xe9\x0e\xf6\xf2^\xbaG:\x07\xdcef\xef\xcf\x0e\xf6\xda\xa9\xbf\x06\x84O\xfb\x00e\x88\x7f\xa7\x11\x00g\x90`\xdf\x85\x97\x95Rf', 'type': 'public-key'}, auth_data: AuthenticatorData(rp_id_hash: h'49960de5880e8c687434170f6476605b8fe4aeb9a28632c7995cf3ba831d9763', flags: 0x01, counter: 63), signature: h'3046022100c9080974ae855029e00d2d770ae78cb1f524d9953d1f3c5e73e1055ea0ac6a5902210082edf3c9f339e78b3d21ee96bba7b677e7c98542ab4191676cc2f840fa7514b2'))
-('CLIENT DATA: ', {"type": "webauthn.get", "clientExtensions": {}, "challenge":   "HQqgIT+Kzcoa26J94veejXl2Q3uDCKI+bzsXER6UNbM=", "origin": "https://localhost:5000"})
-('COMPLETE RESPONSE: ', {'status': 'OK'})
-Authenticated
-$
+```python
+client = Fido2HttpClient()
+result = client.authenticate_to(
+    'https://example.com',
+    '/api/authenticate/begin',
+    '/api/authenticate/complete',
+    extra_headers={'Authorization': 'Bearer <token>'},
+    extra_data={'session_id': 'abc123'},
+)
 ```
+
+### Reusing an existing HTTP session
+
+```python
+import requests
+from fido2client import Fido2HttpClient
+
+session = requests.Session()
+session.cookies.set('csrf_token', '...')
+
+client = Fido2HttpClient()
+result = client.authenticate_to(
+    'https://example.com',
+    '/api/authenticate/begin',
+    '/api/authenticate/complete',
+    session=session,
+)
+```
+
+### Context manager (recommended)
+
+The context manager ensures the HTTP session is closed when done:
+
+```python
+from fido2client import Fido2HttpClient
+
+with Fido2HttpClient() as client:
+    result = client.authenticate_to(
+        'https://example.com',
+        '/api/authenticate/begin',
+        '/api/authenticate/complete',
+    )
+```
+
+### Error handling
+
+```python
+from fido2client import Fido2HttpClient
+from fido2client.exceptions import FidoDeviceNotFoundError, FidoServerError
+import requests
+
+try:
+    with Fido2HttpClient() as client:
+        result = client.authenticate_to(
+            'https://example.com',
+            '/api/authenticate/begin',
+            '/api/authenticate/complete',
+        )
+except FidoDeviceNotFoundError:
+    print('No FIDO2 device found. Connect your authenticator and try again.')
+except FidoServerError as e:
+    print(f'Server communication failed: {e}')
+except requests.exceptions.RequestException as e:
+    print(f'Network error: {e}')
+```
+
+### Configuration options
+
+```python
+client = Fido2HttpClient(
+    ssl_verify=True,  # Verify TLS certificates (default: True, always use in production)
+    timeout=30,       # HTTP request timeout in seconds (default: 30)
+    verbose=False,    # Shortcut to enable DEBUG logging (default: False)
+)
+```
+
+> **Security note:** `ssl_verify=False` disables TLS certificate verification entirely.
+> **Never use this in production** — it makes the connection vulnerable to man-in-the-middle attacks.
+> It is only appropriate for local development environments using self-signed certificates.
+
+### Enabling debug logging
+
+Rather than using the `verbose` flag, you can configure the standard Python logging module:
+
+```python
+import logging
+logging.basicConfig(level=logging.DEBUG)
+logging.getLogger('fido2client').setLevel(logging.DEBUG)
+```
+
+### Local development example
+
+For local testing against a server using a self-signed certificate:
+
+```python
+import fido2client
+
+# WARNING: ssl_verify=False is for local development only.
+# Never use in production.
+c = fido2client.Fido2HttpClient(ssl_verify=False, verbose=True)
+
+c.authenticate_to(
+    'https://localhost:5000',
+    '/api/authenticate/begin',
+    '/api/authenticate/complete',
+)
+```
+
+## Development
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
+
+## Exception hierarchy
+
+| Exception | Raised when |
+|---|---|
+| `Fido2ClientError` | Base class for all fido2client errors |
+| `FidoDeviceNotFoundError` | No FIDO2 device is connected |
+| `FidoServerError` | Server returns an unreadable or unexpected response |
+| `FidoAuthenticationError` | The authentication ceremony cannot proceed |
+
+## License
+
+MIT
 
 TODO
-+ error handling
 + define details of the state machine for interactive and programmatical use cases
-+ tests
 + support for credential registration
