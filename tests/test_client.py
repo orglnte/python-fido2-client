@@ -162,7 +162,7 @@ def test_begin_invalid_cbor(mock_device):
         session.post.return_value = bad
 
         client = Fido2HttpClient()
-        with pytest.raises(FidoServerError, match="Could not decode CBOR begin response"):
+        with pytest.raises(FidoServerError, match="Unexpected CBOR begin response type"):
             client.authenticate_to(MOCK_SERVER, "/begin", "/complete")
 
 

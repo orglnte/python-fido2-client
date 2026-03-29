@@ -234,6 +234,11 @@ class Fido2HttpClient:
         if self._begin_data is None:
             raise FidoAuthenticationError("_begin() must be called before _complete().")
 
+        if not isinstance(self._begin_data, dict):
+            raise FidoServerError(
+                f"Unexpected CBOR begin response type: {type(self._begin_data).__name__}"
+            )
+
         pubkey = self._begin_data.get("publicKey")
         if not pubkey:
             raise FidoServerError("Missing 'publicKey' in server response.")
