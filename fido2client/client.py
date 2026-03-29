@@ -5,6 +5,7 @@ import getpass
 import json
 import logging
 import urllib.parse
+from dataclasses import dataclass
 from typing import Any, Optional
 
 import cbor2 as cbor
@@ -19,6 +20,36 @@ from .exceptions import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _BeginResponse:
+    """Typed representation of the publicKey payload in a WebAuthn begin response."""
+
+    rp_id: str
+    challenge: bytes
+    allow_credentials: list[dict[str, Any]]
+
+    @classmethod
+    def from_cbor(cls, data: Any) -> _BeginResponse:
+        if not isinstance(data, dict):
+            raise FidoServerError(
+                f"Unexpected CBOR begin response type: {type(data).__name__}"
+            )
+        pubkey = data.get("publicKey")
+        if not pubkey:
+            raise FidoServerError("Missing 'publicKey' in server response.")
+        for field in ("rpId", "challenge"):
+            if field not in pubkey:
+                raise FidoServerError(f"Missing required field '{field}' in server response.")
+        creds = pubkey.get("allowCredentials")
+        if not creds:
+            raise FidoServerError("Server returned empty or missing 'allowCredentials'.")
+        return cls(
+            rp_id=pubkey["rpId"],
+            challenge=pubkey["challenge"],
+            allow_credentials=creds,
+        )
 
 
 class Fido2HttpClient:
@@ -56,7 +87,7 @@ class Fido2HttpClient:
         self.dev: Optional[CtapHidDevice] = None
         self.session: Optional[requests.Session] = None
         self._owns_session: bool = False
-        self._begin_data: Optional[dict[str, Any]] = None
+        self._begin_data: Optional[_BeginResponse] = None
         self._last_response: Optional[requests.Response] = None
 
         if verbose:
@@ -154,10 +185,11 @@ class Fido2HttpClient:
             raise FidoServerError(f"Begin request failed: {exc}") from exc
 
         try:
-            self._begin_data = cbor.loads(r.content)
+            raw = cbor.loads(r.content)
         except Exception as exc:
             raise FidoServerError(f"Could not decode CBOR begin response: {exc}") from exc
 
+        self._begin_data = _BeginResponse.from_cbor(raw)
         logger.debug("BEGIN RESPONSE: %s", self._begin_data)
 
     def _complete(
@@ -166,20 +198,22 @@ class Fido2HttpClient:
         extra_data: Optional[dict[str, Any]] = None,
         extra_headers: Optional[dict[str, str]] = None,
     ) -> bool:
-        pubkey = self._validate_begin_data()
+        if self._begin_data is None:
+            raise FidoAuthenticationError("_begin() must be called before _complete().")
 
+        begin = self._begin_data
         fido2_client = Fido2Client(self.dev, self.server)
-        challenge = base64.b64encode(pubkey["challenge"]).decode("utf-8")
-        allow_list = [{"type": "public-key", "id": pubkey["allowCredentials"][0]["id"]}]
+        challenge = base64.b64encode(begin.challenge).decode("utf-8")
+        allow_list = [{"type": "public-key", "id": begin.allow_credentials[0]["id"]}]
 
         print("Touch your authenticator device...")
         try:
             assertions, client_data = fido2_client.get_assertion(
-                pubkey["rpId"], challenge, allow_list
+                begin.rp_id, challenge, allow_list
             )
         except ValueError:
             assertions, client_data = fido2_client.get_assertion(
-                pubkey["rpId"],
+                begin.rp_id,
                 challenge,
                 allow_list,
                 pin=getpass.getpass("Please enter PIN: "),
@@ -236,27 +270,3 @@ class Fido2HttpClient:
 
         return self.is_authenticated
 
-    def _validate_begin_data(self) -> dict[str, Any]:
-        if self._begin_data is None:
-            raise FidoAuthenticationError("_begin() must be called before _complete().")
-
-        if not isinstance(self._begin_data, dict):
-            raise FidoServerError(
-                f"Unexpected CBOR begin response type: {type(self._begin_data).__name__}"
-            )
-
-        pubkey = self._begin_data.get("publicKey")
-        if not pubkey:
-            raise FidoServerError("Missing 'publicKey' in server response.")
-
-        for field in ("rpId", "challenge"):
-            if field not in pubkey:
-                raise FidoServerError(f"Missing required field '{field}' in server response.")
-
-        creds = pubkey.get("allowCredentials")
-        if not creds:
-            raise FidoServerError(
-                "Server returned empty or missing 'allowCredentials'."
-            )
-
-        return pubkey
