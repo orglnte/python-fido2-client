@@ -318,8 +318,9 @@ def test_external_session_reused(mock_fido2):
         _http_response({"status": "OK"}),
     ]
 
-    client = Fido2HttpClient()
-    client.authenticate_to(MOCK_SERVER, "/begin", "/complete", session=external)
+    with Fido2HttpClient() as client:
+        client.authenticate_to(MOCK_SERVER, "/begin", "/complete", session=external)
 
     assert client.session is external
+    external.close.assert_not_called()
     assert external.post.call_count == 2

@@ -55,6 +55,7 @@ class Fido2HttpClient:
         self.server: Optional[str] = None
         self.dev: Optional[CtapHidDevice] = None
         self.session: Optional[requests.Session] = None
+        self._owns_session: bool = False
         self._begin_data: Optional[dict[str, Any]] = None
         self._last_response: Optional[requests.Response] = None
 
@@ -68,7 +69,7 @@ class Fido2HttpClient:
         return self
 
     def __exit__(self, *args: Any) -> None:
-        if self.session is not None:
+        if self._owns_session and self.session is not None:
             self.session.close()
 
     # ------------------------------------------------------------------
@@ -110,8 +111,10 @@ class Fido2HttpClient:
 
         if session is not None:
             self.session = session
-        if self.session is None:
+            self._owns_session = False
+        elif self.session is None:
             self.session = requests.Session()
+            self._owns_session = True
 
         self._init_dev()
 
