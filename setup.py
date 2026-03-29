@@ -13,20 +13,24 @@ setuptools.setup(
     long_description_content_type="text/markdown",
     url="https://github.com/origliante/python-fido2-client",
     packages=setuptools.find_packages(),
-    python_requires='>=3.5',
+    python_requires=">=3.9",
     install_requires=[
-        'fido2',
-        'cbor2',
-        'requests',
-        'simplejson',
+        "fido2>=0.9.0",
+        "cbor2>=5.0.0",
+        "requests>=2.25.0",
     ],
+    extras_require={
+        "dev": [
+            "pytest>=7.0.0",
+            "pytest-cov>=4.0.0",
+        ],
+    },
     classifiers=[
         "Programming Language :: Python :: 3",
-        "License :: OSI Approved :: MIT License", 
+        "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
-        'Topic :: Internet',
-        'Topic :: Security :: Cryptography',
-        'Topic :: Software Development :: Libraries :: Python Modules',
+        "Topic :: Internet",
+        "Topic :: Security :: Cryptography",
+        "Topic :: Software Development :: Libraries :: Python Modules",
     ],
 )
-
