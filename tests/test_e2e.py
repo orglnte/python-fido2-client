@@ -157,24 +157,6 @@ def bad_cbor_server():
 
 
 # ---------------------------------------------------------------------------
-# Device mock helpers
-# ---------------------------------------------------------------------------
-
-
-def _patch_device(assertion=None, client_data="{}"):
-    """Context manager that mocks the FIDO2 HID device and Fido2Client."""
-    if assertion is None:
-        assertion = _mock_assertion()
-
-    device_patch = patch(
-        "fido2client.client.CtapHidDevice.list_devices",
-        return_value=iter([MagicMock()]),
-    )
-    fido2_patch = patch("fido2client.client.Fido2Client")
-    return device_patch, fido2_patch, assertion, client_data
-
-
-# ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
