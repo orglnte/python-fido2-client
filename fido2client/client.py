@@ -220,6 +220,9 @@ class Fido2HttpClient:
         except Exception as exc:
             raise FidoServerError(f"Could not decode CBOR complete response: {exc}") from exc
 
+        if not isinstance(data, dict):
+            raise FidoServerError(f"Could not decode CBOR complete response: unexpected type {type(data).__name__}")
+
         logger.debug("COMPLETE RESPONSE: %s", data)
 
         self.is_authenticated = data.get("status") == "OK"
