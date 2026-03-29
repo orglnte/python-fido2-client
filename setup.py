@@ -12,7 +12,7 @@ setuptools.setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/origliante/python-fido2-client",
-    packages=setuptools.find_packages(),
+    packages=setuptools.find_packages(exclude=["tests", "tests.*"]),
     python_requires=">=3.9",
     install_requires=[
         "fido2>=0.9.0",
@@ -27,7 +27,7 @@ setuptools.setup(
     },
     classifiers=[
         "Programming Language :: Python :: 3",
-        "License :: OSI Approved :: MIT License",
+        "License :: OSI Approved :: MIT License",  # kept for PyPI display; SPDX set in pyproject.toml
         "Operating System :: OS Independent",
         "Topic :: Internet",
         "Topic :: Security :: Cryptography",
