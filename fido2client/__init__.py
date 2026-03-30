@@ -1,3 +1,5 @@
+from importlib.metadata import version
+
 from .client import Fido2HttpClient
 from .exceptions import (
     Fido2ClientError,
@@ -6,7 +8,7 @@ from .exceptions import (
     FidoServerError,
 )
 
-__version__ = "0.11.0"
+__version__ = version("fido2client")
 __all__ = [
     "Fido2HttpClient",
     "Fido2ClientError",
@@ -14,5 +16,3 @@ __all__ = [
     "FidoDeviceNotFoundError",
     "FidoServerError",
 ]
-
-name = "fido2client"
