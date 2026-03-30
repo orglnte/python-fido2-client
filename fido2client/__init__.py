@@ -1,4 +1,4 @@
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 
 from .client import Fido2HttpClient
 from .exceptions import (
@@ -8,7 +8,10 @@ from .exceptions import (
     FidoServerError,
 )
 
-__version__ = version("fido2client")
+try:
+    __version__ = version("fido2client")
+except PackageNotFoundError:
+    __version__ = "0.0.0.dev"
 __all__ = [
     "Fido2HttpClient",
     "Fido2ClientError",
