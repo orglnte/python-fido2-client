@@ -6,7 +6,7 @@ import json
 import logging
 import urllib.parse
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 import cbor2 as cbor
 import requests
@@ -14,7 +14,6 @@ from fido2.client import Fido2Client
 from fido2.hid import CtapHidDevice
 
 from .exceptions import (
-    FidoAuthenticationError,
     FidoDeviceNotFoundError,
     FidoServerError,
 )
@@ -83,12 +82,9 @@ class Fido2HttpClient:
         self.timeout = timeout
         self.is_authenticated: bool = False
 
-        self.server: Optional[str] = None
-        self.dev: Optional[CtapHidDevice] = None
-        self.session: Optional[requests.Session] = None
+        self.session: requests.Session | None = None
         self._owns_session: bool = False
-        self._begin_data: Optional[_BeginResponse] = None
-        self._last_response: Optional[requests.Response] = None
+        self._last_response: requests.Response | None = None
 
         if verbose:
             _handler = logging.StreamHandler()
@@ -112,9 +108,9 @@ class Fido2HttpClient:
         server: str,
         begin_endpoint: str,
         complete_endpoint: str,
-        session: Optional[requests.Session] = None,
-        extra_data: Optional[dict[str, Any]] = None,
-        extra_headers: Optional[dict[str, str]] = None,
+        session: requests.Session | None = None,
+        extra_data: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> bool:
         """Perform a FIDO2 authentication ceremony against a WebAuthn server.
 
@@ -138,8 +134,6 @@ class Fido2HttpClient:
             FidoServerError: The server returned an unreadable or unexpected response.
             requests.exceptions.RequestException: A network-level failure occurred.
         """
-        self.server = server
-
         if session is not None:
             self.session = session
             self._owns_session = False
@@ -147,15 +141,18 @@ class Fido2HttpClient:
             self.session = requests.Session()
             self._owns_session = True
 
-        self._init_dev()
+        dev = self._find_device()
 
         begin_url = urllib.parse.urljoin(server, begin_endpoint)
         complete_url = urllib.parse.urljoin(server, complete_endpoint)
 
-        self._begin(begin_url, extra_headers=extra_headers)
-        return self._complete(complete_url, extra_data=extra_data, extra_headers=extra_headers)
+        begin_data = self._begin(begin_url, extra_headers=extra_headers)
+        return self._complete(
+            server, dev, begin_data, complete_url,
+            extra_data=extra_data, extra_headers=extra_headers,
+        )
 
-    def get_last_response(self) -> Optional[requests.Response]:
+    def get_last_response(self) -> requests.Response | None:
         """Return the raw HTTP response from the last completion request, or None."""
         return self._last_response
 
@@ -163,18 +160,19 @@ class Fido2HttpClient:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _init_dev(self) -> None:
-        self.dev = next(CtapHidDevice.list_devices(), None)
-        if not self.dev:
+    def _find_device(self) -> CtapHidDevice:
+        dev = next(CtapHidDevice.list_devices(), None)
+        if not dev:
             raise FidoDeviceNotFoundError(
                 "No FIDO2 device found. Connect your authenticator and try again."
             )
+        return dev
 
     def _begin(
         self,
         begin_url: str,
-        extra_headers: Optional[dict[str, str]] = None,
-    ) -> None:
+        extra_headers: dict[str, str] | None = None,
+    ) -> _BeginResponse:
         headers: dict[str, str] = dict(extra_headers) if extra_headers else {}
         try:
             r = self.session.post(
@@ -189,34 +187,34 @@ class Fido2HttpClient:
         except Exception as exc:
             raise FidoServerError(f"Could not decode CBOR begin response: {exc}") from exc
 
-        self._begin_data = _BeginResponse.from_cbor(raw)
-        logger.debug("BEGIN RESPONSE: %s", self._begin_data)
+        begin_data = _BeginResponse.from_cbor(raw)
+        logger.debug("BEGIN RESPONSE: %s", begin_data)
+        return begin_data
 
     def _complete(
         self,
+        server: str,
+        dev: CtapHidDevice,
+        begin_data: _BeginResponse,
         complete_url: str,
-        extra_data: Optional[dict[str, Any]] = None,
-        extra_headers: Optional[dict[str, str]] = None,
+        extra_data: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> bool:
-        if self._begin_data is None:
-            raise FidoAuthenticationError("_begin() must be called before _complete().")
-
-        begin = self._begin_data
-        fido2_client = Fido2Client(self.dev, self.server)
-        challenge = base64.b64encode(begin.challenge).decode("utf-8")
+        fido2_client = Fido2Client(dev, server)
+        challenge = base64.b64encode(begin_data.challenge).decode("utf-8")
         allow_list = [
             {"type": "public-key", "id": cred["id"]}
-            for cred in begin.allow_credentials
+            for cred in begin_data.allow_credentials
         ]
 
         print("Touch your authenticator device...")
         try:
             assertions, client_data = fido2_client.get_assertion(
-                begin.rp_id, challenge, allow_list
+                begin_data.rp_id, challenge, allow_list
             )
         except ValueError:
             assertions, client_data = fido2_client.get_assertion(
-                begin.rp_id,
+                begin_data.rp_id,
                 challenge,
                 allow_list,
                 pin=getpass.getpass("Please enter PIN: "),
@@ -272,4 +270,3 @@ class Fido2HttpClient:
             logger.warning("Authentication failed. Server response: %s", data)
 
         return self.is_authenticated
-
