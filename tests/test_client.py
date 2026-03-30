@@ -227,16 +227,18 @@ def test_pin_fallback(mock_device):
             ([assertion], client_data),
         ]
 
-        with patch("fido2client.client.getpass.getpass", return_value="1234"):
-            with patch("fido2client.client.requests.Session") as MockSession:
-                session = MockSession.return_value
-                session.post.side_effect = [
-                    _http_response(MOCK_BEGIN_PAYLOAD),
-                    _http_response({"status": "OK"}),
-                ]
+        with patch("fido2client.client.requests.Session") as MockSession:
+            session = MockSession.return_value
+            session.post.side_effect = [
+                _http_response(MOCK_BEGIN_PAYLOAD),
+                _http_response({"status": "OK"}),
+            ]
 
-                client = Fido2HttpClient()
-                result = client.authenticate_to(MOCK_SERVER, "/begin", "/complete")
+            client = Fido2HttpClient()
+            result = client.authenticate_to(
+                MOCK_SERVER, "/begin", "/complete",
+                pin_callback=lambda: "1234",
+            )
 
     assert result is True
 

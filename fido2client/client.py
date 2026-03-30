@@ -5,6 +5,7 @@ import getpass
 import json
 import logging
 import urllib.parse
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -111,6 +112,8 @@ class Fido2HttpClient:
         session: requests.Session | None = None,
         extra_data: dict[str, Any] | None = None,
         extra_headers: dict[str, str] | None = None,
+        prompt_callback: Callable[[str], None] = print,
+        pin_callback: Callable[[], str] = lambda: getpass.getpass("Please enter PIN: "),
     ) -> bool:
         """Perform a FIDO2 authentication ceremony against a WebAuthn server.
 
@@ -125,6 +128,12 @@ class Fido2HttpClient:
                 A new session is created if omitted.
             extra_data: Optional dict merged into the completion request body.
             extra_headers: Optional HTTP headers added to every request.
+            prompt_callback: Called with a user-facing message when the
+                authenticator requires interaction (e.g. a touch). Defaults
+                to :func:`print`.
+            pin_callback: Called to obtain the authenticator PIN when required.
+                Must return the PIN as a string. Defaults to
+                :func:`getpass.getpass`.
 
         Returns:
             ``True`` if the server confirmed authentication, ``False`` otherwise.
@@ -150,6 +159,7 @@ class Fido2HttpClient:
         return self._complete(
             server, dev, begin_data, complete_url,
             extra_data=extra_data, extra_headers=extra_headers,
+            prompt_callback=prompt_callback, pin_callback=pin_callback,
         )
 
     def get_last_response(self) -> requests.Response | None:
@@ -199,6 +209,8 @@ class Fido2HttpClient:
         complete_url: str,
         extra_data: dict[str, Any] | None = None,
         extra_headers: dict[str, str] | None = None,
+        prompt_callback: Callable[[str], None] = print,
+        pin_callback: Callable[[], str] = lambda: getpass.getpass("Please enter PIN: "),
     ) -> bool:
         fido2_client = Fido2Client(dev, server)
         challenge = base64.b64encode(begin_data.challenge).decode("utf-8")
@@ -207,7 +219,7 @@ class Fido2HttpClient:
             for cred in begin_data.allow_credentials
         ]
 
-        print("Touch your authenticator device...")
+        prompt_callback("Touch your authenticator device...")
         try:
             assertions, client_data = fido2_client.get_assertion(
                 begin_data.rp_id, challenge, allow_list
@@ -217,7 +229,7 @@ class Fido2HttpClient:
                 begin_data.rp_id,
                 challenge,
                 allow_list,
-                pin=getpass.getpass("Please enter PIN: "),
+                pin=pin_callback(),
             )
 
         assertion = assertions[0]
