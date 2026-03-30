@@ -155,9 +155,25 @@ def test_complete_network_error(mock_fido2):
 # ---------------------------------------------------------------------------
 
 
-def test_begin_invalid_cbor(mock_device):
+def test_begin_undecoded_cbor(mock_device):
+    """Server returns bytes that CBOR cannot decode at all."""
     bad = MagicMock(spec=requests.Response)
-    bad.content = b"not cbor at all"
+    bad.content = b"\xc0"
+    bad.raise_for_status = MagicMock()
+
+    with patch("fido2client.client.requests.Session") as MockSession:
+        session = MockSession.return_value
+        session.post.return_value = bad
+
+        client = Fido2HttpClient()
+        with pytest.raises(FidoServerError, match="Could not decode CBOR begin response"):
+            client.authenticate_to(MOCK_SERVER, "/begin", "/complete")
+
+
+def test_begin_non_dict_cbor(mock_device):
+    """Server returns valid CBOR but not a dict (e.g. a string)."""
+    bad = MagicMock(spec=requests.Response)
+    bad.content = cbor2.dumps("not a dict")
     bad.raise_for_status = MagicMock()
 
     with patch("fido2client.client.requests.Session") as MockSession:
