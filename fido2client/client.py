@@ -204,7 +204,10 @@ class Fido2HttpClient:
         begin = self._begin_data
         fido2_client = Fido2Client(self.dev, self.server)
         challenge = base64.b64encode(begin.challenge).decode("utf-8")
-        allow_list = [{"type": "public-key", "id": begin.allow_credentials[0]["id"]}]
+        allow_list = [
+            {"type": "public-key", "id": cred["id"]}
+            for cred in begin.allow_credentials
+        ]
 
         print("Touch your authenticator device...")
         try:

@@ -21,6 +21,8 @@ MOCK_SERVER = "https://example.com"
 MOCK_RP_ID = "example.com"
 MOCK_CHALLENGE = b"\x01\x02\x03\x04"
 MOCK_CRED_ID = b"\x05\x06\x07\x08"
+MOCK_CRED_ID_2 = b"\x09\x0a\x0b\x0c"
+MOCK_CRED_ID_3 = b"\x0d\x0e\x0f\x10"
 
 MOCK_BEGIN_PAYLOAD = {
     "publicKey": {
@@ -324,3 +326,49 @@ def test_external_session_reused(mock_fido2):
     assert client.session is external
     external.close.assert_not_called()
     assert external.post.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Multiple credentials
+# ---------------------------------------------------------------------------
+
+
+def test_all_credentials_passed_to_authenticator(mock_device):
+    """When the server returns multiple allowCredentials, all must reach the authenticator."""
+    multi_cred_payload = {
+        "publicKey": {
+            "rpId": MOCK_RP_ID,
+            "challenge": MOCK_CHALLENGE,
+            "allowCredentials": [
+                {"id": MOCK_CRED_ID, "type": "public-key"},
+                {"id": MOCK_CRED_ID_2, "type": "public-key"},
+                {"id": MOCK_CRED_ID_3, "type": "public-key"},
+            ],
+            "timeout": 30000,
+            "userVerification": "preferred",
+        }
+    }
+
+    assertion = _mock_assertion()
+    client_data = '{"type":"webauthn.get"}'
+
+    with patch("fido2client.client.Fido2Client") as MockFido2Client:
+        instance = MockFido2Client.return_value
+        instance.get_assertion.return_value = ([assertion], client_data)
+
+        with patch("fido2client.client.requests.Session") as MockSession:
+            session = MockSession.return_value
+            session.post.side_effect = [
+                _http_response(multi_cred_payload),
+                _http_response({"status": "OK"}),
+            ]
+
+            client = Fido2HttpClient()
+            result = client.authenticate_to(MOCK_SERVER, "/begin", "/complete")
+
+    assert result is True
+    allow_list = instance.get_assertion.call_args[0][2]
+    assert len(allow_list) == 3
+    assert allow_list[0]["id"] == MOCK_CRED_ID
+    assert allow_list[1]["id"] == MOCK_CRED_ID_2
+    assert allow_list[2]["id"] == MOCK_CRED_ID_3
