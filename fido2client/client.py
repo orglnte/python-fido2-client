@@ -144,6 +144,8 @@ class Fido2HttpClient:
             requests.exceptions.RequestException: A network-level failure occurred.
         """
         if session is not None:
+            if self._owns_session and self.session is not None:
+                self.session.close()
             self.session = session
             self._owns_session = False
         elif self.session is None:
