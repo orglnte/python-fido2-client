@@ -11,7 +11,7 @@ from typing import Any
 
 import cbor2 as cbor
 import requests
-from fido2.client import Fido2Client
+from fido2.client import Fido2Client, PinRequiredError
 from fido2.hid import CtapHidDevice
 
 from .exceptions import (
@@ -224,7 +224,7 @@ class Fido2HttpClient:
             assertions, client_data = fido2_client.get_assertion(
                 begin_data.rp_id, challenge, allow_list
             )
-        except ValueError:
+        except PinRequiredError:
             assertions, client_data = fido2_client.get_assertion(
                 begin_data.rp_id,
                 challenge,

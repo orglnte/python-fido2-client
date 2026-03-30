@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import cbor2
 import pytest
 import requests
+from fido2.client import PinRequiredError
 
 from fido2client import Fido2HttpClient
 from fido2client.exceptions import (
@@ -223,7 +224,7 @@ def test_pin_fallback(mock_device):
     with patch("fido2client.client.Fido2Client") as MockFido2Client:
         instance = MockFido2Client.return_value
         instance.get_assertion.side_effect = [
-            ValueError("PIN required"),
+            PinRequiredError(),
             ([assertion], client_data),
         ]
 
