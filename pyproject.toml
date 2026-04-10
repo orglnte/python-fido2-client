@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fido2client"
-version = "0.11.0"
+version = "0.11.1"
 description = "WebAuthn API FIDO2 client"
 readme = "README.md"
 license = "MIT"
