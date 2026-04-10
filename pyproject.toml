@@ -8,9 +8,9 @@ version = "0.11.0"
 description = "WebAuthn API FIDO2 client"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 authors = [
-    { name = "origliante" },
+    { name = "orglnte" },
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -32,7 +32,7 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/origliante/python-fido2-client"
+Homepage = "https://github.com/orglnte/python-fido2-client"
 
 [tool.setuptools.packages.find]
 exclude = ["tests", "tests.*"]

@@ -1,7 +1,7 @@
 # python-fido2-client
 
-[![Tests](https://github.com/origliante/python-fido2-client/actions/workflows/python-package.yml/badge.svg)](https://github.com/origliante/python-fido2-client/actions/workflows/python-package.yml)
-[![Publish](https://github.com/origliante/python-fido2-client/actions/workflows/python-publish.yml/badge.svg)](https://github.com/origliante/python-fido2-client/actions/workflows/python-publish.yml)
+[![Tests](https://github.com/orglnte/python-fido2-client/actions/workflows/python-package.yml/badge.svg)](https://github.com/orglnte/python-fido2-client/actions/workflows/python-package.yml)
+[![Publish](https://github.com/orglnte/python-fido2-client/actions/workflows/python-publish.yml/badge.svg)](https://github.com/orglnte/python-fido2-client/actions/workflows/python-publish.yml)
 [![PyPI](https://img.shields.io/pypi/v/fido2client)](https://pypi.org/project/fido2client/)
 
 WebAuthn API FIDO2 client implementation in Python.
@@ -12,7 +12,7 @@ Tested against the [python-fido2 server example](https://github.com/Yubico/pytho
 
 ## Requirements
 
-- Python 3.9+
+- Python 3.10+
 - A FIDO2-compatible USB authenticator (e.g. YubiKey)
 - A WebAuthn server implementing the begin/complete authentication flow using CBOR encoding
 
@@ -98,11 +98,33 @@ with Fido2HttpClient() as client:
     )
 ```
 
+### Custom callbacks
+
+By default, `authenticate_to` uses `print` for user prompts and `getpass.getpass`
+for PIN entry. Override these for GUI apps or headless automation:
+
+```python
+from fido2client import Fido2HttpClient
+
+with Fido2HttpClient() as client:
+    result = client.authenticate_to(
+        'https://example.com',
+        '/api/authenticate/begin',
+        '/api/authenticate/complete',
+        prompt_callback=lambda msg: my_ui.show(msg),
+        pin_callback=lambda: my_ui.ask_pin(),
+    )
+```
+
 ### Error handling
 
 ```python
 from fido2client import Fido2HttpClient
-from fido2client.exceptions import FidoDeviceNotFoundError, FidoServerError
+from fido2client.exceptions import (
+    FidoAuthenticationError,
+    FidoDeviceNotFoundError,
+    FidoServerError,
+)
 import requests
 
 try:
@@ -114,6 +136,8 @@ try:
         )
 except FidoDeviceNotFoundError:
     print('No FIDO2 device found. Connect your authenticator and try again.')
+except FidoAuthenticationError as e:
+    print(f'Authentication ceremony failed: {e}')
 except FidoServerError as e:
     print(f'Server communication failed: {e}')
 except requests.exceptions.RequestException as e:
@@ -181,7 +205,3 @@ pytest
 ## License
 
 MIT
-
-TODO
-+ define details of the state machine for interactive and programmatical use cases
-+ support for credential registration
