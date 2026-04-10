@@ -1,7 +1,7 @@
 # python-fido2-client
 
 [![Tests](https://github.com/orglnte/python-fido2-client/actions/workflows/python-package.yml/badge.svg)](https://github.com/orglnte/python-fido2-client/actions/workflows/python-package.yml)
-[![Publish](https://github.com/orglnte/python-fido2-client/actions/workflows/python-publish.yml/badge.svg)](https://github.com/orglnte/python-fido2-client/actions/workflows/python-publish.yml)
+[![Publish](https://github.com/orglnte/python-fido2-client/actions/workflows/python-publish.yml/badge.svg?event=release)](https://github.com/orglnte/python-fido2-client/actions/workflows/python-publish.yml)
 [![PyPI](https://img.shields.io/pypi/v/fido2client)](https://pypi.org/project/fido2client/)
 
 WebAuthn API FIDO2 client implementation in Python.
