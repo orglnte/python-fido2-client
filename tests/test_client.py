@@ -325,6 +325,34 @@ def test_begin_missing_rp_id(session, credential_id):
         client.authenticate_to(MOCK_SERVER, "/begin", "/complete")
 
 
+@pytest.mark.parametrize(
+    "bad_options",
+    [
+        {"rpId": None},
+        {"rpId": 5},
+        {"challenge": 5},
+        {"challenge": [1, 2]},
+        {"challenge": "%%%"},
+        {"allowCredentials": [None]},
+        {"allowCredentials": ["abc"]},
+        {"allowCredentials": [{"type": "public-key"}]},
+        {"allowCredentials": [{"type": "public-key", "id": 7}]},
+        {"allowCredentials": {"id": b"\x01"}},
+        {"timeout": "abc"},
+    ],
+    ids=lambda o: f"{next(iter(o))}={next(iter(o.values()))!r}",
+)
+def test_begin_malformed_options(session, credential_id, bad_options):
+    payload = _begin_payload(credential_id)
+    payload["publicKey"].update(bad_options)
+    session.post.return_value = _http_response(payload)
+
+    with pytest.raises(FidoServerError, match="Malformed request options"):
+        Fido2HttpClient().authenticate_to(MOCK_SERVER, "/begin", "/complete")
+
+    assert session.post.call_count == 1
+
+
 def test_complete_undecoded_cbor(session, credential_id):
     session.post.side_effect = [
         _http_response(_begin_payload(credential_id)),

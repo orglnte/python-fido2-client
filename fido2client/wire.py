@@ -102,7 +102,27 @@ def request_options(data: Any, codec: Codec) -> PublicKeyCredentialRequestOption
             raise FidoServerError(f"Missing required field '{field}' in server response.")
     if not options.get("allowCredentials"):
         raise FidoServerError("Server returned empty or missing 'allowCredentials'.")
+    _check_types(options)
     try:
-        return PublicKeyCredentialRequestOptions.from_dict(options)
+        parsed = PublicKeyCredentialRequestOptions.from_dict(options)
     except (TypeError, ValueError, KeyError) as exc:
         raise FidoServerError(f"Malformed request options in server response: {exc}") from exc
+    if not parsed.challenge:
+        raise FidoServerError("Malformed request options in server response: empty challenge.")
+    return parsed
+
+
+def _check_types(options: dict[str, Any]) -> None:
+    """Reject values fido2's parser would coerce silently, e.g. an int challenge into zero bytes."""
+    problem = None
+    if not isinstance(options["rpId"], str) or not options["rpId"]:
+        problem = "'rpId' must be a non-empty string"
+    elif not isinstance(options["challenge"], (bytes, str)):
+        problem = "'challenge' must be bytes or a base64url string"
+    elif not isinstance(options["allowCredentials"], list) or not all(
+        isinstance(c, dict) and isinstance(c.get("id"), (bytes, str))
+        for c in options["allowCredentials"]
+    ):
+        problem = "'allowCredentials' must be a list of credentials with an 'id'"
+    if problem:
+        raise FidoServerError(f"Malformed request options in server response: {problem}.")

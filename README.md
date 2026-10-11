@@ -101,8 +101,9 @@ Errors, all subclasses of `fido2client.Fido2ClientError`:
 ## What the server must speak
 
 1. **Begin** (`POST`, optional body `begin_data`) answers with WebAuthn request options,
-   bare or wrapped as `{"publicKey": {...}}`, containing `rpId`, `challenge` and a
-   non-empty `allowCredentials`.
+   bare or wrapped as `{"publicKey": {...}}`, containing `rpId` (a string), `challenge`
+   (bytes, or base64url in JSON) and a non-empty `allowCredentials` list of credentials
+   with an `id`. Anything else is refused with `FidoServerError` before the key is used.
 2. **Complete** (`POST`) receives the assertion: the standard WebAuthn JSON
    (`id`, `rawId`, `response`, `type`) with `WireFormat.JSON`, or the fields
    `credentialId`, `authenticatorData`, `clientDataJSON`, `signature` with
