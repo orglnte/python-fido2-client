@@ -4,189 +4,117 @@
 [![Publish](https://github.com/orglnte/python-fido2-client/actions/workflows/python-publish.yml/badge.svg?event=release)](https://github.com/orglnte/python-fido2-client/actions/workflows/python-publish.yml)
 [![PyPI](https://img.shields.io/pypi/v/fido2client)](https://pypi.org/project/fido2client/)
 
-WebAuthn API FIDO2 client implementation in Python.
+Log in to a WebAuthn/FIDO2 server with a security key, from the console or from
+your Python app.
 
-A Python library for authenticating against WebAuthn/FIDO2 servers. Handles FIDO2 device discovery, assertion retrieval over CTAP HID, and server communication.
-
-Speaks the CBOR begin/complete protocol of the
-[python-fido2 0.9 server example](https://github.com/Yubico/python-fido2/tree/0.9.3/examples/server).
-The test suite runs every ceremony end to end against `fido2.server.Fido2Server`
-with a software authenticator, so no hardware key is needed to test.
-
-## Requirements
-
-- Python 3.10+
-- A FIDO2-compatible USB authenticator (e.g. YubiKey)
-- A WebAuthn server implementing the begin/complete authentication flow using CBOR encoding
-
-## Installation
+`fido2client` calls the server's begin/complete endpoints over HTTP (JSON or CBOR),
+gets the signed assertion from a USB key such as a YubiKey through Yubico's
+[`fido2`](https://github.com/Yubico/python-fido2), and keeps the logged-in session.
+Use it to test a WebAuthn server with a real key, or to add security-key login to
+a client-side tool.
 
 ```bash
 pip install fido2client
 ```
 
-## Quick start
+Requires Python 3.10+. On Linux, USB access to the key needs a
+[udev rule](https://developers.yubico.com/python-fido2/) (or root). On
+Windows 10 1903 and later, direct access to the key needs Administrator rights.
 
-```python
-import fido2client
+## From the console
 
-with fido2client.Fido2HttpClient() as client:
-    authenticated = client.authenticate_to(
-        'https://your-server.com',
-        '/api/authenticate/begin',
-        '/api/authenticate/complete',
-    )
-    if authenticated:
-        print('Authenticated!')
+```console
+$ fido2client login https://example.com --begin-data '{"username": "alice"}'
+Touch your authenticator device...
+Authenticated.
+session=eyJhbGciOi...
 ```
 
-## Usage
+The session cookies go to stdout as one `Cookie` header value, everything else to
+stderr, so the login drops into a script:
 
-### Basic authentication
-
-```python
-from fido2client import Fido2HttpClient
-
-client = Fido2HttpClient()
-result = client.authenticate_to(
-    'https://example.com',
-    '/api/authenticate/begin',
-    '/api/authenticate/complete',
-)
+```bash
+cookie=$(fido2client login https://example.com) && curl -H "Cookie: $cookie" https://example.com/api/me
 ```
 
-### With custom headers or extra data
+Exit status: `0` authenticated, `1` rejected by the server, `2` error (no key,
+network, HTTP 5xx, malformed response, wrong PIN). A PIN is asked for on the terminal when
+the key has one and the server wants user verification.
+
+| Option | Default | |
+|---|---|---|
+| `--begin PATH`, `--complete PATH` | `/api/authenticate/begin`, `/api/authenticate/complete` | endpoints |
+| `--format json\|cbor` | `json` | message encoding |
+| `--begin-data JSON` | | body of the begin request |
+| `--extra-data JSON` | | extra fields for the complete request |
+| `-H 'NAME: VALUE'` | | extra header, repeatable |
+| `-k`, `--insecure` | | skip TLS verification, local development only |
+| `--timeout SECONDS`, `-v` | `30` | HTTP timeout, debug logging |
+
+`python -m fido2client` works the same way.
+
+## From Python
 
 ```python
-client = Fido2HttpClient()
-result = client.authenticate_to(
-    'https://example.com',
-    '/api/authenticate/begin',
-    '/api/authenticate/complete',
-    extra_headers={'Authorization': 'Bearer <token>'},
-    extra_data={'session_id': 'abc123'},
-)
-```
-
-### Reusing an existing HTTP session
-
-```python
-import requests
-from fido2client import Fido2HttpClient
-
-session = requests.Session()
-session.cookies.set('csrf_token', '...')
-
-client = Fido2HttpClient()
-result = client.authenticate_to(
-    'https://example.com',
-    '/api/authenticate/begin',
-    '/api/authenticate/complete',
-    session=session,
-)
-```
-
-### Context manager (recommended)
-
-The context manager ensures the HTTP session is closed when done:
-
-```python
-from fido2client import Fido2HttpClient
+from fido2client import Fido2HttpClient, WireFormat
 
 with Fido2HttpClient() as client:
-    result = client.authenticate_to(
-        'https://example.com',
-        '/api/authenticate/begin',
-        '/api/authenticate/complete',
-    )
+    if client.authenticate_to(
+        "https://example.com",
+        "/api/authenticate/begin",
+        "/api/authenticate/complete",
+        wire_format=WireFormat.JSON,
+        begin_data={"username": "alice"},
+    ):
+        me = client.session.get("https://example.com/api/me")
 ```
 
-### Custom callbacks
+`authenticate_to` returns `True` when the server confirms the login and `False` when
+it rejects it (see [What the server must speak](#what-the-server-must-speak)); `client.session`
+is the `requests.Session` that now carries the server's cookies, and
+`client.get_last_response()` is the raw completion response.
 
-By default, `authenticate_to` uses `print` to ask for a touch when the authenticator
-waits for one, and `getpass.getpass` for PIN entry when the authenticator has a PIN
-set and the server asks for user verification. Override these for GUI apps or
-headless automation:
+| `authenticate_to` argument | |
+|---|---|
+| `wire_format` | `WireFormat.JSON` for most servers; `WireFormat.CBOR` (the default, for compatibility) for the python-fido2 0.9 example protocol |
+| `begin_data` | body of the begin request; none sent when omitted |
+| `extra_data` | extra fields for the complete request: top level of the JSON body (the assertion's own keys, such as `id` or `response`, take precedence), or base64 JSON in `user_data` with CBOR |
+| `extra_headers` | headers for both requests |
+| `session` | your own `requests.Session` to log in with; it is not closed by the client |
+| `prompt_callback`, `pin_callback` | how to ask for a touch (default `print`) and a PIN (default `getpass`); replace for GUI or headless apps |
 
-```python
-from fido2client import Fido2HttpClient
+`Fido2HttpClient(ssl_verify=True, timeout=30, verbose=False)` sets TLS verification,
+the HTTP timeout in seconds, and DEBUG logging on the `fido2client` logger.
 
-with Fido2HttpClient() as client:
-    result = client.authenticate_to(
-        'https://example.com',
-        '/api/authenticate/begin',
-        '/api/authenticate/complete',
-        prompt_callback=lambda msg: my_ui.show(msg),
-        pin_callback=lambda: my_ui.ask_pin(),
-    )
-```
+Errors, all subclasses of `fido2client.Fido2ClientError`:
 
-### Error handling
+| Exception | Raised when |
+|---|---|
+| `FidoDeviceNotFoundError` | no FIDO2 key is connected |
+| `FidoServerError` | a request fails (network or HTTP status, chained as `__cause__`), or the server's response is unreadable or unexpected |
+| `FidoAuthenticationError` | the key does not sign: no matching credential, wrong or missing PIN, user verification unavailable, RP ID not valid for the server's address, or timeout |
 
-```python
-from fido2client import Fido2HttpClient
-from fido2client.exceptions import (
-    FidoAuthenticationError,
-    FidoDeviceNotFoundError,
-    FidoServerError,
-)
+> **Security:** `ssl_verify=False` and `--insecure` turn off TLS certificate checks,
+> which exposes the login to man-in-the-middle attacks. Use them only against a local
+> server with a self-signed certificate.
 
-try:
-    with Fido2HttpClient() as client:
-        result = client.authenticate_to(
-            'https://example.com',
-            '/api/authenticate/begin',
-            '/api/authenticate/complete',
-        )
-except FidoDeviceNotFoundError:
-    print('No FIDO2 device found. Connect your authenticator and try again.')
-except FidoAuthenticationError as e:
-    print(f'Authenticator did not sign: {e}')
-except FidoServerError as e:
-    print(f'Server communication failed: {e}')  # network errors chained as e.__cause__
-```
+## What the server must speak
 
-### Configuration options
+1. **Begin** (`POST`, optional body `begin_data`) answers with WebAuthn request options,
+   bare or wrapped as `{"publicKey": {...}}`, containing `rpId`, `challenge` and a
+   non-empty `allowCredentials`.
+2. **Complete** (`POST`) receives the assertion: the standard WebAuthn JSON
+   (`id`, `rawId`, `response`, `type`) with `WireFormat.JSON`, or the fields
+   `credentialId`, `authenticatorData`, `clientDataJSON`, `signature` with
+   `WireFormat.CBOR`.
+3. The login counts as successful when complete answers `{"status": "OK"}`; any
+   other status, or an HTTP 4xx, counts as rejected; an HTTP 5xx is an error.
+4. The `rpId` must be the server's host or a parent domain of it, over `https`
+   (`http` only for `localhost`); the client refuses anything else.
 
-```python
-client = Fido2HttpClient(
-    ssl_verify=True,  # Verify TLS certificates (default: True, always use in production)
-    timeout=30,       # HTTP request timeout in seconds (default: 30)
-    verbose=False,    # Shortcut to enable DEBUG logging (default: False)
-)
-```
-
-> **Security note:** `ssl_verify=False` disables TLS certificate verification entirely.
-> **Never use this in production** — it makes the connection vulnerable to man-in-the-middle attacks.
-> It is only appropriate for local development environments using self-signed certificates.
-
-### Enabling debug logging
-
-Rather than using the `verbose` flag, you can configure the standard Python logging module:
-
-```python
-import logging
-logging.basicConfig(level=logging.DEBUG)
-logging.getLogger('fido2client').setLevel(logging.DEBUG)
-```
-
-### Local development example
-
-For local testing against a server using a self-signed certificate:
-
-```python
-import fido2client
-
-# WARNING: ssl_verify=False is for local development only.
-# Never use in production.
-c = fido2client.Fido2HttpClient(ssl_verify=False, verbose=True)
-
-c.authenticate_to(
-    'https://localhost:5000',
-    '/api/authenticate/begin',
-    '/api/authenticate/complete',
-)
-```
+The [python-fido2 example server](https://github.com/Yubico/python-fido2/tree/main/examples/server)
+speaks this protocol in JSON; its
+[0.9 version](https://github.com/Yubico/python-fido2/tree/0.9.3/examples/server) in CBOR.
 
 ## Development
 
@@ -195,19 +123,10 @@ pip install -e ".[dev]"
 pytest
 ```
 
-`tests/test_e2e.py` runs the client against a real relying party
-(`tests/relying_party.py`, `fido2.server.Fido2Server` over HTTP on localhost)
-and a software CTAP2 authenticator (`tests/virtual_authenticator.py`) that signs
-with real ES256 keys and supports a PIN. Only USB HID discovery is replaced.
-
-## Exception hierarchy
-
-| Exception | Raised when |
-|---|---|
-| `Fido2ClientError` | Base class for all fido2client errors |
-| `FidoDeviceNotFoundError` | No FIDO2 device is connected |
-| `FidoServerError` | A request fails (network or HTTP status), or the server returns an unreadable or unexpected response |
-| `FidoAuthenticationError` | The authenticator does not sign: no matching credential, wrong or missing PIN, user verification unavailable, RP ID not valid for the server's origin, or timeout |
+No key is needed: the tests run every login end to end, in both formats, against
+`fido2.server.Fido2Server` on localhost (`tests/relying_party.py`) with a software
+CTAP2 authenticator that signs with real ES256 keys and supports a PIN
+(`tests/virtual_authenticator.py`). Only USB discovery is replaced.
 
 ## License
 
