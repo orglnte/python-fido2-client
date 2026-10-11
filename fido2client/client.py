@@ -6,50 +6,67 @@ import json
 import logging
 import urllib.parse
 from collections.abc import Callable
-from dataclasses import dataclass
 from typing import Any
 
 import cbor2 as cbor
 import requests
-from fido2.client import Fido2Client, PinRequiredError
+from fido2.client import ClientError, DefaultClientDataCollector, Fido2Client, UserInteraction
+from fido2.ctap2.pin import ClientPin
 from fido2.hid import CtapHidDevice
+from fido2.webauthn import AuthenticationResponse, PublicKeyCredentialRequestOptions
 
 from .exceptions import (
+    FidoAuthenticationError,
     FidoDeviceNotFoundError,
     FidoServerError,
 )
 
 logger = logging.getLogger(__name__)
+_verbose_handler = logging.StreamHandler()
+_verbose_handler.setLevel(logging.DEBUG)
 
 
-@dataclass
-class _BeginResponse:
-    """Typed representation of the publicKey payload in a WebAuthn begin response."""
-
-    rp_id: str
-    challenge: bytes
-    allow_credentials: list[dict[str, Any]]
-
-    @classmethod
-    def from_cbor(cls, data: Any) -> _BeginResponse:
-        if not isinstance(data, dict):
-            raise FidoServerError(
-                f"Unexpected CBOR begin response type: {type(data).__name__}"
-            )
-        pubkey = data.get("publicKey")
-        if not pubkey:
-            raise FidoServerError("Missing 'publicKey' in server response.")
-        for field in ("rpId", "challenge"):
-            if field not in pubkey:
-                raise FidoServerError(f"Missing required field '{field}' in server response.")
-        creds = pubkey.get("allowCredentials")
-        if not creds:
-            raise FidoServerError("Server returned empty or missing 'allowCredentials'.")
-        return cls(
-            rp_id=pubkey["rpId"],
-            challenge=pubkey["challenge"],
-            allow_credentials=creds,
+def _request_options_from_cbor(data: Any) -> PublicKeyCredentialRequestOptions:
+    """Validate a decoded begin response and return its publicKey request options."""
+    if not isinstance(data, dict):
+        raise FidoServerError(
+            f"Unexpected CBOR begin response type: {type(data).__name__}"
         )
+    pubkey = data.get("publicKey")
+    if not pubkey:
+        raise FidoServerError("Missing 'publicKey' in server response.")
+    for field in ("rpId", "challenge"):
+        if field not in pubkey:
+            raise FidoServerError(f"Missing required field '{field}' in server response.")
+    if not pubkey.get("allowCredentials"):
+        raise FidoServerError("Server returned empty or missing 'allowCredentials'.")
+    try:
+        return PublicKeyCredentialRequestOptions.from_dict(pubkey)
+    except (TypeError, ValueError, KeyError) as exc:
+        raise FidoServerError(f"Malformed 'publicKey' in server response: {exc}") from exc
+
+
+def _origin(server: str) -> str:
+    parts = urllib.parse.urlsplit(server)
+    return f"{parts.scheme}://{parts.netloc}"
+
+
+class _CallbackInteraction(UserInteraction):
+    """Routes fido2's user-interaction requests to the caller's callbacks."""
+
+    def __init__(
+        self,
+        prompt_callback: Callable[[str], None],
+        pin_callback: Callable[[], str],
+    ) -> None:
+        self._prompt_callback = prompt_callback
+        self._pin_callback = pin_callback
+
+    def prompt_up(self) -> None:
+        self._prompt_callback("Touch your authenticator device...")
+
+    def request_pin(self, permissions: ClientPin.PERMISSION, rp_id: str | None) -> str | None:
+        return self._pin_callback()
 
 
 class Fido2HttpClient:
@@ -88,9 +105,7 @@ class Fido2HttpClient:
         self._last_response: requests.Response | None = None
 
         if verbose:
-            _handler = logging.StreamHandler()
-            _handler.setLevel(logging.DEBUG)
-            logger.addHandler(_handler)
+            logger.addHandler(_verbose_handler)
             logger.setLevel(logging.DEBUG)
 
     def __enter__(self) -> Fido2HttpClient:
@@ -126,11 +141,11 @@ class Fido2HttpClient:
                 (e.g. ``'/api/authenticate/complete'``).
             session: Optional :class:`requests.Session` to reuse.
                 A new session is created if omitted.
-            extra_data: Optional dict merged into the completion request body.
+            extra_data: Optional dict sent to the server as the ``user_data``
+                field of the completion request (JSON, then base64).
             extra_headers: Optional HTTP headers added to every request.
             prompt_callback: Called with a user-facing message when the
-                authenticator requires interaction (e.g. a touch). Defaults
-                to :func:`print`.
+                authenticator waits for a touch. Defaults to :func:`print`.
             pin_callback: Called to obtain the authenticator PIN when required.
                 Must return the PIN as a string. Defaults to
                 :func:`getpass.getpass`.
@@ -140,8 +155,13 @@ class Fido2HttpClient:
 
         Raises:
             FidoDeviceNotFoundError: No FIDO2 device is connected.
-            FidoServerError: The server returned an unreadable or unexpected response.
-            requests.exceptions.RequestException: A network-level failure occurred.
+            FidoServerError: A request failed at network or HTTP level (the
+                :mod:`requests` exception is chained as ``__cause__``), or the
+                server returned an unreadable or unexpected response.
+            FidoAuthenticationError: The authenticator did not produce an
+                assertion: no matching credential, wrong or missing PIN, user
+                verification unavailable, RP ID not valid for the server's
+                origin, or timeout.
         """
         if session is not None:
             if self._owns_session and self.session is not None:
@@ -152,16 +172,20 @@ class Fido2HttpClient:
             self.session = requests.Session()
             self._owns_session = True
 
+        self.is_authenticated = False
         dev = self._find_device()
 
         begin_url = urllib.parse.urljoin(server, begin_endpoint)
         complete_url = urllib.parse.urljoin(server, complete_endpoint)
 
-        begin_data = self._begin(begin_url, extra_headers=extra_headers)
+        options = self._begin(begin_url, extra_headers=extra_headers)
+        assertion = self._get_assertion(
+            dev, _origin(server), options,
+            _CallbackInteraction(prompt_callback, pin_callback),
+        )
         return self._complete(
-            server, dev, begin_data, complete_url,
+            complete_url, assertion,
             extra_data=extra_data, extra_headers=extra_headers,
-            prompt_callback=prompt_callback, pin_callback=pin_callback,
         )
 
     def get_last_response(self) -> requests.Response | None:
@@ -184,7 +208,7 @@ class Fido2HttpClient:
         self,
         begin_url: str,
         extra_headers: dict[str, str] | None = None,
-    ) -> _BeginResponse:
+    ) -> PublicKeyCredentialRequestOptions:
         headers: dict[str, str] = dict(extra_headers) if extra_headers else {}
         try:
             r = self.session.post(
@@ -199,52 +223,39 @@ class Fido2HttpClient:
         except Exception as exc:
             raise FidoServerError(f"Could not decode CBOR begin response: {exc}") from exc
 
-        begin_data = _BeginResponse.from_cbor(raw)
-        logger.debug("BEGIN RESPONSE: %s", begin_data)
-        return begin_data
+        options = _request_options_from_cbor(raw)
+        logger.debug("BEGIN RESPONSE: %s", options)
+        return options
+
+    def _get_assertion(
+        self,
+        dev: CtapHidDevice,
+        origin: str,
+        options: PublicKeyCredentialRequestOptions,
+        interaction: UserInteraction,
+    ) -> AuthenticationResponse:
+        fido2_client = Fido2Client(dev, DefaultClientDataCollector(origin), interaction)
+        try:
+            response = fido2_client.get_assertion(options).get_response(0)
+        except ClientError as exc:
+            raise FidoAuthenticationError(f"Authenticator did not produce an assertion: {exc}") from exc
+        logger.debug("ASSERTION: %s", response)
+        return response
 
     def _complete(
         self,
-        server: str,
-        dev: CtapHidDevice,
-        begin_data: _BeginResponse,
         complete_url: str,
+        assertion: AuthenticationResponse,
         extra_data: dict[str, Any] | None = None,
         extra_headers: dict[str, str] | None = None,
-        prompt_callback: Callable[[str], None] = print,
-        pin_callback: Callable[[], str] = lambda: getpass.getpass("Please enter PIN: "),
     ) -> bool:
-        fido2_client = Fido2Client(dev, server)
-        challenge = base64.b64encode(begin_data.challenge).decode("utf-8")
-        allow_list = [
-            {"type": "public-key", "id": cred["id"]}
-            for cred in begin_data.allow_credentials
-        ]
-
-        prompt_callback("Touch your authenticator device...")
-        try:
-            assertions, client_data = fido2_client.get_assertion(
-                begin_data.rp_id, challenge, allow_list
-            )
-        except PinRequiredError:
-            assertions, client_data = fido2_client.get_assertion(
-                begin_data.rp_id,
-                challenge,
-                allow_list,
-                pin=pin_callback(),
-            )
-
-        assertion = assertions[0]
-        logger.debug("ASSERTION: %s", assertion)
-        logger.debug("CLIENT DATA: %s", client_data)
-
         user_data = base64.b64encode(json.dumps(extra_data or {}).encode("utf-8"))
         body = cbor.dumps(
             {
-                "credentialId": assertion.credential["id"],
-                "authenticatorData": assertion.auth_data,
-                "clientDataJSON": client_data,
-                "signature": assertion.signature,
+                "credentialId": assertion.raw_id,
+                "authenticatorData": bytes(assertion.response.authenticator_data),
+                "clientDataJSON": bytes(assertion.response.client_data),
+                "signature": assertion.response.signature,
                 "user_data": user_data,
             }
         )

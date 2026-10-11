@@ -8,7 +8,10 @@ WebAuthn API FIDO2 client implementation in Python.
 
 A Python library for authenticating against WebAuthn/FIDO2 servers. Handles FIDO2 device discovery, assertion retrieval over CTAP HID, and server communication.
 
-Tested against the [python-fido2 server example](https://github.com/Yubico/python-fido2/tree/master/examples/server).
+Speaks the CBOR begin/complete protocol of the
+[python-fido2 0.9 server example](https://github.com/Yubico/python-fido2/tree/0.9.3/examples/server).
+The test suite runs every ceremony end to end against `fido2.server.Fido2Server`
+with a software authenticator, so no hardware key is needed to test.
 
 ## Requirements
 
@@ -100,8 +103,10 @@ with Fido2HttpClient() as client:
 
 ### Custom callbacks
 
-By default, `authenticate_to` uses `print` for user prompts and `getpass.getpass`
-for PIN entry. Override these for GUI apps or headless automation:
+By default, `authenticate_to` uses `print` to ask for a touch when the authenticator
+waits for one, and `getpass.getpass` for PIN entry when the authenticator has a PIN
+set and the server asks for user verification. Override these for GUI apps or
+headless automation:
 
 ```python
 from fido2client import Fido2HttpClient
@@ -125,7 +130,6 @@ from fido2client.exceptions import (
     FidoDeviceNotFoundError,
     FidoServerError,
 )
-import requests
 
 try:
     with Fido2HttpClient() as client:
@@ -137,11 +141,9 @@ try:
 except FidoDeviceNotFoundError:
     print('No FIDO2 device found. Connect your authenticator and try again.')
 except FidoAuthenticationError as e:
-    print(f'Authentication ceremony failed: {e}')
+    print(f'Authenticator did not sign: {e}')
 except FidoServerError as e:
-    print(f'Server communication failed: {e}')
-except requests.exceptions.RequestException as e:
-    print(f'Network error: {e}')
+    print(f'Server communication failed: {e}')  # network errors chained as e.__cause__
 ```
 
 ### Configuration options
@@ -193,14 +195,19 @@ pip install -e ".[dev]"
 pytest
 ```
 
+`tests/test_e2e.py` runs the client against a real relying party
+(`tests/relying_party.py`, `fido2.server.Fido2Server` over HTTP on localhost)
+and a software CTAP2 authenticator (`tests/virtual_authenticator.py`) that signs
+with real ES256 keys and supports a PIN. Only USB HID discovery is replaced.
+
 ## Exception hierarchy
 
 | Exception | Raised when |
 |---|---|
 | `Fido2ClientError` | Base class for all fido2client errors |
 | `FidoDeviceNotFoundError` | No FIDO2 device is connected |
-| `FidoServerError` | Server returns an unreadable or unexpected response |
-| `FidoAuthenticationError` | The authentication ceremony cannot proceed |
+| `FidoServerError` | A request fails (network or HTTP status), or the server returns an unreadable or unexpected response |
+| `FidoAuthenticationError` | The authenticator does not sign: no matching credential, wrong or missing PIN, user verification unavailable, RP ID not valid for the server's origin, or timeout |
 
 ## License
 

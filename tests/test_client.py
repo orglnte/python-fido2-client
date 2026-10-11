@@ -1,42 +1,50 @@
+"""Tests for Fido2HttpClient with the HTTP layer mocked.
+
+The FIDO2 side is real: ``fido2.client.Fido2Client`` drives the software
+authenticator from ``tests/virtual_authenticator.py``, so a change in the
+fido2 API surfaces here instead of being absorbed by a mock.
+"""
 from __future__ import annotations
 
-import base64
+import json
+import logging
 from unittest.mock import MagicMock, patch
 
 import cbor2
 import pytest
 import requests
-from fido2.client import PinRequiredError
+from fido2.utils import websafe_encode
 
 from fido2client import Fido2HttpClient
+from fido2client.client import logger as client_logger
 from fido2client.exceptions import (
+    FidoAuthenticationError,
     FidoDeviceNotFoundError,
     FidoServerError,
 )
 
-# ---------------------------------------------------------------------------
-# Test fixtures / helpers
-# ---------------------------------------------------------------------------
+from .virtual_authenticator import VirtualAuthenticator
 
 MOCK_SERVER = "https://example.com"
 MOCK_RP_ID = "example.com"
-MOCK_CHALLENGE = b"\x01\x02\x03\x04"
-MOCK_CRED_ID = b"\x05\x06\x07\x08"
-MOCK_CRED_ID_2 = b"\x09\x0a\x0b\x0c"
-MOCK_CRED_ID_3 = b"\x0d\x0e\x0f\x10"
+MOCK_CHALLENGE = b"\x01\x02\x03\x04" * 8
+FOREIGN_CRED_ID = b"\x09\x0a\x0b\x0c"
+OTHER_FOREIGN_CRED_ID = b"\x0d\x0e\x0f\x10"
 
-MOCK_BEGIN_PAYLOAD = {
-    "publicKey": {
-        "rpId": MOCK_RP_ID,
-        "challenge": MOCK_CHALLENGE,
-        "allowCredentials": [{"id": MOCK_CRED_ID, "type": "public-key"}],
-        "timeout": 30000,
-        "userVerification": "preferred",
+
+def _begin_payload(*credential_ids: bytes, rp_id: str = MOCK_RP_ID) -> dict:
+    return {
+        "publicKey": {
+            "rpId": rp_id,
+            "challenge": MOCK_CHALLENGE,
+            "allowCredentials": [{"id": cid, "type": "public-key"} for cid in credential_ids],
+            "timeout": 30000,
+            "userVerification": "preferred",
+        }
     }
-}
 
 
-def _http_response(payload: dict, status_code: int = 200) -> MagicMock:
+def _http_response(payload, status_code: int = 200) -> MagicMock:
     r = MagicMock(spec=requests.Response)
     r.content = cbor2.dumps(payload)
     r.status_code = status_code
@@ -44,36 +52,26 @@ def _http_response(payload: dict, status_code: int = 200) -> MagicMock:
     return r
 
 
-def _mock_assertion() -> MagicMock:
-    a = MagicMock()
-    a.credential = {"id": MOCK_CRED_ID, "type": "public-key"}
-    a.auth_data = b"\xaa\xbb\xcc"
-    a.signature = b"\xdd\xee\xff"
-    return a
+def _raw_response(content: bytes) -> MagicMock:
+    r = MagicMock(spec=requests.Response)
+    r.content = content
+    r.raise_for_status = MagicMock()
+    return r
 
 
 @pytest.fixture()
-def mock_device():
-    device = MagicMock()
-    with patch("fido2client.client.CtapHidDevice.list_devices", return_value=iter([device])):
-        yield device
+def credential_id(authenticator: VirtualAuthenticator) -> bytes:
+    return authenticator.create_credential(MOCK_RP_ID).credential_id
 
 
 @pytest.fixture()
-def mock_no_device():
-    with patch("fido2client.client.CtapHidDevice.list_devices", return_value=iter([])):
-        yield
+def session():
+    with patch("fido2client.client.requests.Session") as MockSession:
+        yield MockSession.return_value
 
 
-@pytest.fixture()
-def mock_fido2(mock_device):
-    """Patches Fido2Client.get_assertion to return a successful assertion."""
-    assertion = _mock_assertion()
-    client_data = '{"type":"webauthn.get"}'
-    with patch("fido2client.client.Fido2Client") as MockFido2Client:
-        instance = MockFido2Client.return_value
-        instance.get_assertion.return_value = ([assertion], client_data)
-        yield instance
+def _complete_body(session) -> dict:
+    return cbor2.loads(session.post.call_args_list[1].kwargs["data"])
 
 
 # ---------------------------------------------------------------------------
@@ -81,44 +79,96 @@ def mock_fido2(mock_device):
 # ---------------------------------------------------------------------------
 
 
-def test_no_device_raises(mock_no_device):
-    client = Fido2HttpClient()
-    with pytest.raises(FidoDeviceNotFoundError):
-        client.authenticate_to(MOCK_SERVER, "/begin", "/complete")
-
-
-# ---------------------------------------------------------------------------
-# Happy path
-# ---------------------------------------------------------------------------
-
-
-def test_authenticate_success(mock_fido2):
-    with patch("fido2client.client.requests.Session") as MockSession:
-        session = MockSession.return_value
-        session.post.side_effect = [
-            _http_response(MOCK_BEGIN_PAYLOAD),
-            _http_response({"status": "OK"}),
-        ]
-
+def test_no_device_raises():
+    with patch("fido2client.client.CtapHidDevice.list_devices", return_value=iter([])):
         client = Fido2HttpClient()
-        result = client.authenticate_to(MOCK_SERVER, "/begin", "/complete")
+        with pytest.raises(FidoDeviceNotFoundError):
+            client.authenticate_to(MOCK_SERVER, "/begin", "/complete")
+
+
+# ---------------------------------------------------------------------------
+# Ceremony
+# ---------------------------------------------------------------------------
+
+
+def test_authenticate_success(session, credential_id):
+    session.post.side_effect = [
+        _http_response(_begin_payload(credential_id)),
+        _http_response({"status": "OK"}),
+    ]
+
+    client = Fido2HttpClient()
+    result = client.authenticate_to(MOCK_SERVER, "/begin", "/complete")
 
     assert result is True
     assert client.is_authenticated is True
+    body = _complete_body(session)
+    assert set(body) == {"credentialId", "authenticatorData", "clientDataJSON", "signature", "user_data"}
+    assert body["credentialId"] == credential_id
+    client_data = json.loads(body["clientDataJSON"])
+    assert client_data["type"] == "webauthn.get"
+    assert client_data["origin"] == MOCK_SERVER
+    assert client_data["challenge"] == websafe_encode(MOCK_CHALLENGE)
 
 
-def test_authenticate_failure(mock_fido2):
-    with patch("fido2client.client.requests.Session") as MockSession:
-        session = MockSession.return_value
-        session.post.side_effect = [
-            _http_response(MOCK_BEGIN_PAYLOAD),
-            _http_response({"status": "FAILED", "message": "invalid signature"}),
-        ]
+def test_authenticate_failure(session, credential_id):
+    session.post.side_effect = [
+        _http_response(_begin_payload(credential_id)),
+        _http_response({"status": "FAILED", "message": "invalid signature"}),
+    ]
 
-        client = Fido2HttpClient()
-        result = client.authenticate_to(MOCK_SERVER, "/begin", "/complete")
+    client = Fido2HttpClient()
+    result = client.authenticate_to(MOCK_SERVER, "/begin", "/complete")
 
     assert result is False
+    assert client.is_authenticated is False
+
+
+def test_origin_is_scheme_and_host_of_server_url(session, credential_id):
+    session.post.side_effect = [
+        _http_response(_begin_payload(credential_id)),
+        _http_response({"status": "OK"}),
+    ]
+
+    Fido2HttpClient().authenticate_to(f"{MOCK_SERVER}/app/", "/begin", "/complete")
+
+    assert json.loads(_complete_body(session)["clientDataJSON"])["origin"] == MOCK_SERVER
+
+
+def test_authenticator_picks_its_credential_from_allow_list(session, credential_id):
+    session.post.side_effect = [
+        _http_response(_begin_payload(FOREIGN_CRED_ID, credential_id, OTHER_FOREIGN_CRED_ID)),
+        _http_response({"status": "OK"}),
+    ]
+
+    result = Fido2HttpClient().authenticate_to(MOCK_SERVER, "/begin", "/complete")
+
+    assert result is True
+    assert _complete_body(session)["credentialId"] == credential_id
+
+
+def test_rp_id_foreign_to_server_origin_raises(session, authenticator):
+    foreign_cred = authenticator.create_credential("bank.example").credential_id
+    session.post.side_effect = [_http_response(_begin_payload(foreign_cred, rp_id="bank.example"))]
+
+    with pytest.raises(FidoAuthenticationError):
+        Fido2HttpClient().authenticate_to(MOCK_SERVER, "/begin", "/complete")
+
+    assert session.post.call_count == 1
+
+
+def test_is_authenticated_resets_when_next_attempt_fails(session, credential_id):
+    session.post.side_effect = [
+        _http_response(_begin_payload(credential_id)),
+        _http_response({"status": "OK"}),
+        requests.exceptions.ConnectionError("refused"),
+    ]
+
+    client = Fido2HttpClient()
+    assert client.authenticate_to(MOCK_SERVER, "/begin", "/complete") is True
+    with pytest.raises(FidoServerError):
+        client.authenticate_to(MOCK_SERVER, "/begin", "/complete")
+
     assert client.is_authenticated is False
 
 
@@ -127,27 +177,23 @@ def test_authenticate_failure(mock_fido2):
 # ---------------------------------------------------------------------------
 
 
-def test_begin_network_error(mock_device):
-    with patch("fido2client.client.requests.Session") as MockSession:
-        session = MockSession.return_value
-        session.post.side_effect = requests.exceptions.ConnectionError("refused")
+def test_begin_network_error(session, authenticator):
+    session.post.side_effect = requests.exceptions.ConnectionError("refused")
 
-        client = Fido2HttpClient()
-        with pytest.raises(FidoServerError, match="Begin request failed"):
-            client.authenticate_to(MOCK_SERVER, "/begin", "/complete")
+    client = Fido2HttpClient()
+    with pytest.raises(FidoServerError, match="Begin request failed"):
+        client.authenticate_to(MOCK_SERVER, "/begin", "/complete")
 
 
-def test_complete_network_error(mock_fido2):
-    with patch("fido2client.client.requests.Session") as MockSession:
-        session = MockSession.return_value
-        session.post.side_effect = [
-            _http_response(MOCK_BEGIN_PAYLOAD),
-            requests.exceptions.ConnectionError("refused"),
-        ]
+def test_complete_network_error(session, credential_id):
+    session.post.side_effect = [
+        _http_response(_begin_payload(credential_id)),
+        requests.exceptions.ConnectionError("refused"),
+    ]
 
-        client = Fido2HttpClient()
-        with pytest.raises(FidoServerError, match="Complete request failed"):
-            client.authenticate_to(MOCK_SERVER, "/begin", "/complete")
+    client = Fido2HttpClient()
+    with pytest.raises(FidoServerError, match="Complete request failed"):
+        client.authenticate_to(MOCK_SERVER, "/begin", "/complete")
 
 
 # ---------------------------------------------------------------------------
@@ -155,187 +201,93 @@ def test_complete_network_error(mock_fido2):
 # ---------------------------------------------------------------------------
 
 
-def test_begin_undecoded_cbor(mock_device):
+def test_begin_undecoded_cbor(session, authenticator):
     """Server returns bytes that CBOR cannot decode at all."""
-    bad = MagicMock(spec=requests.Response)
-    bad.content = b"\xc0"
-    bad.raise_for_status = MagicMock()
+    session.post.return_value = _raw_response(b"\xc0")
 
-    with patch("fido2client.client.requests.Session") as MockSession:
-        session = MockSession.return_value
-        session.post.return_value = bad
-
-        client = Fido2HttpClient()
-        with pytest.raises(FidoServerError, match="Could not decode CBOR begin response"):
-            client.authenticate_to(MOCK_SERVER, "/begin", "/complete")
-
-
-def test_begin_non_dict_cbor(mock_device):
-    """Server returns valid CBOR but not a dict (e.g. a string)."""
-    bad = MagicMock(spec=requests.Response)
-    bad.content = cbor2.dumps("not a dict")
-    bad.raise_for_status = MagicMock()
-
-    with patch("fido2client.client.requests.Session") as MockSession:
-        session = MockSession.return_value
-        session.post.return_value = bad
-
-        client = Fido2HttpClient()
-        with pytest.raises(FidoServerError, match="Unexpected CBOR begin response type"):
-            client.authenticate_to(MOCK_SERVER, "/begin", "/complete")
-
-
-def test_begin_missing_public_key(mock_device):
-    with patch("fido2client.client.requests.Session") as MockSession:
-        session = MockSession.return_value
-        session.post.return_value = _http_response({"somethingElse": {}})
-
-        client = Fido2HttpClient()
-        with pytest.raises(FidoServerError, match="Missing 'publicKey'"):
-            client.authenticate_to(MOCK_SERVER, "/begin", "/complete")
-
-
-def test_begin_empty_allow_credentials(mock_device):
-    payload = {
-        "publicKey": {
-            "rpId": MOCK_RP_ID,
-            "challenge": MOCK_CHALLENGE,
-            "allowCredentials": [],
-        }
-    }
-    with patch("fido2client.client.requests.Session") as MockSession:
-        session = MockSession.return_value
-        session.post.return_value = _http_response(payload)
-
-        client = Fido2HttpClient()
-        with pytest.raises(FidoServerError, match="empty or missing 'allowCredentials'"):
-            client.authenticate_to(MOCK_SERVER, "/begin", "/complete")
-
-
-def test_begin_missing_rp_id(mock_device):
-    payload = {
-        "publicKey": {
-            "challenge": MOCK_CHALLENGE,
-            "allowCredentials": [{"id": MOCK_CRED_ID, "type": "public-key"}],
-        }
-    }
-    with patch("fido2client.client.requests.Session") as MockSession:
-        session = MockSession.return_value
-        session.post.return_value = _http_response(payload)
-
-        client = Fido2HttpClient()
-        with pytest.raises(FidoServerError, match="Missing required field 'rpId'"):
-            client.authenticate_to(MOCK_SERVER, "/begin", "/complete")
-
-
-# ---------------------------------------------------------------------------
-# PIN fallback
-# ---------------------------------------------------------------------------
-
-
-def test_pin_fallback(mock_device):
-    assertion = _mock_assertion()
-    client_data = '{"type":"webauthn.get"}'
-
-    with patch("fido2client.client.Fido2Client") as MockFido2Client:
-        instance = MockFido2Client.return_value
-        instance.get_assertion.side_effect = [
-            PinRequiredError(),
-            ([assertion], client_data),
-        ]
-
-        with patch("fido2client.client.requests.Session") as MockSession:
-            session = MockSession.return_value
-            session.post.side_effect = [
-                _http_response(MOCK_BEGIN_PAYLOAD),
-                _http_response({"status": "OK"}),
-            ]
-
-            client = Fido2HttpClient()
-            result = client.authenticate_to(
-                MOCK_SERVER, "/begin", "/complete",
-                pin_callback=lambda: "1234",
-            )
-
-    assert result is True
-
-
-# ---------------------------------------------------------------------------
-# Context manager
-# ---------------------------------------------------------------------------
-
-
-def test_context_manager_closes_session(mock_fido2):
-    with patch("fido2client.client.requests.Session") as MockSession:
-        session = MockSession.return_value
-        session.post.side_effect = [
-            _http_response(MOCK_BEGIN_PAYLOAD),
-            _http_response({"status": "OK"}),
-        ]
-
-        with Fido2HttpClient() as client:
-            client.authenticate_to(MOCK_SERVER, "/begin", "/complete")
-
-        session.close.assert_called_once()
-
-
-# ---------------------------------------------------------------------------
-# get_last_response
-# ---------------------------------------------------------------------------
-
-
-def test_get_last_response_is_none_before_auth():
     client = Fido2HttpClient()
-    assert client.get_last_response() is None
-
-
-def test_get_last_response_after_auth(mock_fido2):
-    complete_resp = _http_response({"status": "OK"})
-
-    with patch("fido2client.client.requests.Session") as MockSession:
-        session = MockSession.return_value
-        session.post.side_effect = [_http_response(MOCK_BEGIN_PAYLOAD), complete_resp]
-
-        client = Fido2HttpClient()
+    with pytest.raises(FidoServerError, match="Could not decode CBOR begin response"):
         client.authenticate_to(MOCK_SERVER, "/begin", "/complete")
 
-    assert client.get_last_response() is complete_resp
+
+def test_begin_non_dict_cbor(session, authenticator):
+    """Server returns valid CBOR but not a dict (e.g. a string)."""
+    session.post.return_value = _http_response("not a dict")
+
+    client = Fido2HttpClient()
+    with pytest.raises(FidoServerError, match="Unexpected CBOR begin response type"):
+        client.authenticate_to(MOCK_SERVER, "/begin", "/complete")
+
+
+def test_begin_missing_public_key(session, authenticator):
+    session.post.return_value = _http_response({"somethingElse": {}})
+
+    client = Fido2HttpClient()
+    with pytest.raises(FidoServerError, match="Missing 'publicKey'"):
+        client.authenticate_to(MOCK_SERVER, "/begin", "/complete")
+
+
+def test_begin_empty_allow_credentials(session, authenticator):
+    session.post.return_value = _http_response(_begin_payload())
+
+    client = Fido2HttpClient()
+    with pytest.raises(FidoServerError, match="empty or missing 'allowCredentials'"):
+        client.authenticate_to(MOCK_SERVER, "/begin", "/complete")
+
+
+def test_begin_missing_rp_id(session, credential_id):
+    payload = _begin_payload(credential_id)
+    del payload["publicKey"]["rpId"]
+    session.post.return_value = _http_response(payload)
+
+    client = Fido2HttpClient()
+    with pytest.raises(FidoServerError, match="Missing required field 'rpId'"):
+        client.authenticate_to(MOCK_SERVER, "/begin", "/complete")
+
+
+def test_complete_undecoded_cbor(session, credential_id):
+    session.post.side_effect = [
+        _http_response(_begin_payload(credential_id)),
+        _raw_response(b"\xff\xfe\xfd"),
+    ]
+
+    client = Fido2HttpClient()
+    with pytest.raises(FidoServerError, match="Could not decode CBOR complete response"):
+        client.authenticate_to(MOCK_SERVER, "/begin", "/complete")
+
+
+def test_complete_non_dict_cbor(session, credential_id):
+    session.post.side_effect = [
+        _http_response(_begin_payload(credential_id)),
+        _http_response(["OK"]),
+    ]
+
+    client = Fido2HttpClient()
+    with pytest.raises(FidoServerError, match="unexpected type list"):
+        client.authenticate_to(MOCK_SERVER, "/begin", "/complete")
 
 
 # ---------------------------------------------------------------------------
-# Extra headers forwarded to both requests
+# Session handling
 # ---------------------------------------------------------------------------
 
 
-def test_extra_headers_forwarded(mock_fido2):
-    with patch("fido2client.client.requests.Session") as MockSession:
-        session = MockSession.return_value
-        session.post.side_effect = [
-            _http_response(MOCK_BEGIN_PAYLOAD),
-            _http_response({"status": "OK"}),
-        ]
+def test_context_manager_closes_session(session, credential_id):
+    session.post.side_effect = [
+        _http_response(_begin_payload(credential_id)),
+        _http_response({"status": "OK"}),
+    ]
 
-        client = Fido2HttpClient()
-        client.authenticate_to(
-            MOCK_SERVER,
-            "/begin",
-            "/complete",
-            extra_headers={"X-Custom": "value"},
-        )
+    with Fido2HttpClient() as client:
+        client.authenticate_to(MOCK_SERVER, "/begin", "/complete")
 
-    for call in session.post.call_args_list:
-        assert call.kwargs["headers"].get("X-Custom") == "value"
+    session.close.assert_called_once()
 
 
-# ---------------------------------------------------------------------------
-# External session is reused
-# ---------------------------------------------------------------------------
-
-
-def test_external_session_reused(mock_fido2):
+def test_external_session_reused(credential_id):
     external = MagicMock(spec=requests.Session)
     external.post.side_effect = [
-        _http_response(MOCK_BEGIN_PAYLOAD),
+        _http_response(_begin_payload(credential_id)),
         _http_response({"status": "OK"}),
     ]
 
@@ -347,47 +299,58 @@ def test_external_session_reused(mock_fido2):
     assert external.post.call_count == 2
 
 
+def test_get_last_response_is_none_before_auth():
+    client = Fido2HttpClient()
+    assert client.get_last_response() is None
+
+
+def test_get_last_response_after_auth(session, credential_id):
+    complete_resp = _http_response({"status": "OK"})
+    session.post.side_effect = [_http_response(_begin_payload(credential_id)), complete_resp]
+
+    client = Fido2HttpClient()
+    client.authenticate_to(MOCK_SERVER, "/begin", "/complete")
+
+    assert client.get_last_response() is complete_resp
+
+
+def test_extra_headers_forwarded(session, credential_id):
+    session.post.side_effect = [
+        _http_response(_begin_payload(credential_id)),
+        _http_response({"status": "OK"}),
+    ]
+
+    client = Fido2HttpClient()
+    client.authenticate_to(
+        MOCK_SERVER,
+        "/begin",
+        "/complete",
+        extra_headers={"X-Custom": "value"},
+    )
+
+    assert session.post.call_count == 2
+    for call in session.post.call_args_list:
+        assert call.kwargs["headers"].get("X-Custom") == "value"
+
+
 # ---------------------------------------------------------------------------
-# Multiple credentials
+# Logging
 # ---------------------------------------------------------------------------
 
 
-def test_all_credentials_passed_to_authenticator(mock_device):
-    """When the server returns multiple allowCredentials, all must reach the authenticator."""
-    multi_cred_payload = {
-        "publicKey": {
-            "rpId": MOCK_RP_ID,
-            "challenge": MOCK_CHALLENGE,
-            "allowCredentials": [
-                {"id": MOCK_CRED_ID, "type": "public-key"},
-                {"id": MOCK_CRED_ID_2, "type": "public-key"},
-                {"id": MOCK_CRED_ID_3, "type": "public-key"},
-            ],
-            "timeout": 30000,
-            "userVerification": "preferred",
-        }
-    }
+@pytest.fixture()
+def restore_client_logger():
+    handlers, level = list(client_logger.handlers), client_logger.level
+    yield
+    client_logger.handlers[:] = handlers
+    client_logger.setLevel(level)
 
-    assertion = _mock_assertion()
-    client_data = '{"type":"webauthn.get"}'
 
-    with patch("fido2client.client.Fido2Client") as MockFido2Client:
-        instance = MockFido2Client.return_value
-        instance.get_assertion.return_value = ([assertion], client_data)
+def test_verbose_attaches_one_handler_for_many_clients(restore_client_logger):
+    before = len(client_logger.handlers)
 
-        with patch("fido2client.client.requests.Session") as MockSession:
-            session = MockSession.return_value
-            session.post.side_effect = [
-                _http_response(multi_cred_payload),
-                _http_response({"status": "OK"}),
-            ]
+    Fido2HttpClient(verbose=True)
+    Fido2HttpClient(verbose=True)
 
-            client = Fido2HttpClient()
-            result = client.authenticate_to(MOCK_SERVER, "/begin", "/complete")
-
-    assert result is True
-    allow_list = instance.get_assertion.call_args[0][2]
-    assert len(allow_list) == 3
-    assert allow_list[0]["id"] == MOCK_CRED_ID
-    assert allow_list[1]["id"] == MOCK_CRED_ID_2
-    assert allow_list[2]["id"] == MOCK_CRED_ID_3
+    assert len(client_logger.handlers) == before + 1
+    assert client_logger.level == logging.DEBUG
