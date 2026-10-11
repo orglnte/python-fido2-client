@@ -42,6 +42,7 @@ class VirtualAuthenticator(CtapDevice):
         self._pin_protocol = PinProtocolV1()
         self._key_agreement = ec.generate_private_key(ec.SECP256R1())
         self._pin_token = os.urandom(32)
+        self._unplugged = False
         self.sign_count = 0
 
     @property
@@ -65,6 +66,10 @@ class VirtualAuthenticator(CtapDevice):
         """Swap the credential's private key, so its signatures stop matching the RP's copy."""
         self._credentials[credential_id].private_key = ec.generate_private_key(ec.SECP256R1())
 
+    def unplug(self) -> None:
+        """Fail every later command the way a removed USB device does."""
+        self._unplugged = True
+
     def call(
         self,
         cmd: int,
@@ -72,6 +77,8 @@ class VirtualAuthenticator(CtapDevice):
         event: Event | None = None,
         on_keepalive: Callable[[STATUS], None] | None = None,
     ) -> bytes:
+        if self._unplugged:
+            raise OSError("device disconnected")
         if cmd != CTAPHID.CBOR:
             raise CtapError(CtapError.ERR.INVALID_COMMAND)
         command = data[0]

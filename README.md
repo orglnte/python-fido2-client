@@ -92,7 +92,7 @@ Errors, all subclasses of `fido2client.Fido2ClientError`:
 |---|---|
 | `FidoDeviceNotFoundError` | no FIDO2 key is connected |
 | `FidoServerError` | a request fails (network or HTTP status, chained as `__cause__`), or the server's response is unreadable or unexpected |
-| `FidoAuthenticationError` | the key does not sign: no matching credential, wrong or missing PIN, user verification unavailable, RP ID not valid for the server's address, or timeout |
+| `FidoAuthenticationError` | the key does not sign: no matching credential, wrong or missing PIN, user verification unavailable, RP ID not valid for the server's address, timeout, or the device failed (e.g. unplugged) |
 
 > **Security:** `ssl_verify=False` and `--insecure` turn off TLS certificate checks,
 > which exposes the login to man-in-the-middle attacks. Use them only against a local

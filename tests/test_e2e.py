@@ -119,6 +119,16 @@ def test_server_error_on_completion_raises(authenticator, wire_format):
             _authenticate(rp)
 
 
+def test_unplugged_authenticator_raises(authenticator, relying_party):
+    _register(authenticator, relying_party)
+    authenticator.unplug()
+
+    with pytest.raises(FidoAuthenticationError, match="device disconnected"):
+        _authenticate(relying_party)
+
+    assert relying_party.requests_to(COMPLETE_PATH) == []
+
+
 def test_authenticator_without_registered_credential_raises(authenticator, relying_party):
     relying_party.credentials.append(VirtualAuthenticator().create_credential("localhost"))
 

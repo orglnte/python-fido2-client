@@ -8,6 +8,7 @@ from typing import Any
 
 import requests
 from fido2.client import ClientError, DefaultClientDataCollector, Fido2Client, UserInteraction
+from fido2.ctap import CtapError
 from fido2.ctap2.pin import ClientPin
 from fido2.hid import CtapHidDevice
 from fido2.webauthn import AuthenticationResponse, PublicKeyCredentialRequestOptions
@@ -150,7 +151,7 @@ class Fido2HttpClient:
             FidoAuthenticationError: The authenticator did not produce an
                 assertion: no matching credential, wrong or missing PIN, user
                 verification unavailable, RP ID not valid for the server's
-                origin, or timeout.
+                origin, timeout, or the device failed (e.g. unplugged).
         """
         if session is not None:
             if self._owns_session and self.session is not None:
@@ -220,10 +221,10 @@ class Fido2HttpClient:
         options: PublicKeyCredentialRequestOptions,
         interaction: UserInteraction,
     ) -> AuthenticationResponse:
-        fido2_client = Fido2Client(dev, DefaultClientDataCollector(origin), interaction)
         try:
+            fido2_client = Fido2Client(dev, DefaultClientDataCollector(origin), interaction)
             response = fido2_client.get_assertion(options).get_response(0)
-        except ClientError as exc:
+        except (ClientError, CtapError, OSError) as exc:
             raise FidoAuthenticationError(f"Authenticator did not produce an assertion: {exc}") from exc
         logger.debug("ASSERTION: %s", response)
         return response
