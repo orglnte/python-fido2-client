@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61", "wheel"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -21,7 +21,7 @@ classifiers = [
 ]
 dependencies = [
     "fido2>=2.0,<3",
-    "cbor2>=5.0.0",
+    "cbor2>=5.5.0",
     "requests>=2.25.0",
 ]
 
