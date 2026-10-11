@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import base64
 import getpass
-import json
 import logging
 import urllib.parse
 from collections.abc import Callable
 from typing import Any
 
-import cbor2 as cbor
 import requests
 from fido2.client import ClientError, DefaultClientDataCollector, Fido2Client, UserInteraction
 from fido2.ctap2.pin import ClientPin
@@ -20,30 +17,11 @@ from .exceptions import (
     FidoDeviceNotFoundError,
     FidoServerError,
 )
+from .wire import Codec, WireFormat, request_options
 
 logger = logging.getLogger(__name__)
 _verbose_handler = logging.StreamHandler()
 _verbose_handler.setLevel(logging.DEBUG)
-
-
-def _request_options_from_cbor(data: Any) -> PublicKeyCredentialRequestOptions:
-    """Validate a decoded begin response and return its publicKey request options."""
-    if not isinstance(data, dict):
-        raise FidoServerError(
-            f"Unexpected CBOR begin response type: {type(data).__name__}"
-        )
-    pubkey = data.get("publicKey")
-    if not pubkey:
-        raise FidoServerError("Missing 'publicKey' in server response.")
-    for field in ("rpId", "challenge"):
-        if field not in pubkey:
-            raise FidoServerError(f"Missing required field '{field}' in server response.")
-    if not pubkey.get("allowCredentials"):
-        raise FidoServerError("Server returned empty or missing 'allowCredentials'.")
-    try:
-        return PublicKeyCredentialRequestOptions.from_dict(pubkey)
-    except (TypeError, ValueError, KeyError) as exc:
-        raise FidoServerError(f"Malformed 'publicKey' in server response: {exc}") from exc
 
 
 def _origin(server: str) -> str:
@@ -129,6 +107,8 @@ class Fido2HttpClient:
         extra_headers: dict[str, str] | None = None,
         prompt_callback: Callable[[str], None] = print,
         pin_callback: Callable[[], str] = lambda: getpass.getpass("Please enter PIN: "),
+        wire_format: WireFormat = WireFormat.CBOR,
+        begin_data: dict[str, Any] | None = None,
     ) -> bool:
         """Perform a FIDO2 authentication ceremony against a WebAuthn server.
 
@@ -141,17 +121,26 @@ class Fido2HttpClient:
                 (e.g. ``'/api/authenticate/complete'``).
             session: Optional :class:`requests.Session` to reuse.
                 A new session is created if omitted.
-            extra_data: Optional dict sent to the server as the ``user_data``
-                field of the completion request (JSON, then base64).
+            extra_data: Optional dict sent with the completion request: merged
+                into the top level of the body with ``WireFormat.JSON``, where
+                keys of the assertion itself (``id``, ``rawId``, ``response``,
+                ``type``, ...) take precedence; as the ``user_data`` field (JSON,
+                then base64) with ``WireFormat.CBOR``.
             extra_headers: Optional HTTP headers added to every request.
             prompt_callback: Called with a user-facing message when the
                 authenticator waits for a touch. Defaults to :func:`print`.
             pin_callback: Called to obtain the authenticator PIN when required.
                 Must return the PIN as a string. Defaults to
                 :func:`getpass.getpass`.
+            wire_format: Encoding of the begin/complete messages. Defaults to
+                ``WireFormat.CBOR`` for compatibility; most servers expect
+                ``WireFormat.JSON``.
+            begin_data: Optional dict sent as the body of the begin request,
+                e.g. ``{"username": "alice"}``. No body is sent when omitted.
 
         Returns:
-            ``True`` if the server confirmed authentication, ``False`` otherwise.
+            ``True`` if the complete request answered ``{"status": "OK"}``;
+            ``False`` if it answered another status or an HTTP 4xx.
 
         Raises:
             FidoDeviceNotFoundError: No FIDO2 device is connected.
@@ -178,13 +167,14 @@ class Fido2HttpClient:
         begin_url = urllib.parse.urljoin(server, begin_endpoint)
         complete_url = urllib.parse.urljoin(server, complete_endpoint)
 
-        options = self._begin(begin_url, extra_headers=extra_headers)
+        codec = WireFormat(wire_format).codec
+        options = self._begin(begin_url, codec, begin_data=begin_data, extra_headers=extra_headers)
         assertion = self._get_assertion(
             dev, _origin(server), options,
             _CallbackInteraction(prompt_callback, pin_callback),
         )
         return self._complete(
-            complete_url, assertion,
+            complete_url, codec, assertion,
             extra_data=extra_data, extra_headers=extra_headers,
         )
 
@@ -207,23 +197,19 @@ class Fido2HttpClient:
     def _begin(
         self,
         begin_url: str,
+        codec: Codec,
+        begin_data: dict[str, Any] | None = None,
         extra_headers: dict[str, str] | None = None,
     ) -> PublicKeyCredentialRequestOptions:
-        headers: dict[str, str] = dict(extra_headers) if extra_headers else {}
-        try:
-            r = self.session.post(
-                begin_url, verify=self.ssl_verify, headers=headers, timeout=self.timeout
-            )
-            r.raise_for_status()
-        except requests.exceptions.RequestException as exc:
-            raise FidoServerError(f"Begin request failed: {exc}") from exc
+        body = codec.dumps(begin_data) if begin_data is not None else None
+        r = self._post(begin_url, "Begin", codec, body, extra_headers)
 
         try:
-            raw = cbor.loads(r.content)
+            raw = codec.loads(r.content)
         except Exception as exc:
-            raise FidoServerError(f"Could not decode CBOR begin response: {exc}") from exc
+            raise FidoServerError(f"Could not decode {codec.name} begin response: {exc}") from exc
 
-        options = _request_options_from_cbor(raw)
+        options = request_options(raw, codec)
         logger.debug("BEGIN RESPONSE: %s", options)
         return options
 
@@ -245,46 +231,28 @@ class Fido2HttpClient:
     def _complete(
         self,
         complete_url: str,
+        codec: Codec,
         assertion: AuthenticationResponse,
         extra_data: dict[str, Any] | None = None,
         extra_headers: dict[str, str] | None = None,
     ) -> bool:
-        user_data = base64.b64encode(json.dumps(extra_data or {}).encode("utf-8"))
-        body = cbor.dumps(
-            {
-                "credentialId": assertion.raw_id,
-                "authenticatorData": bytes(assertion.response.authenticator_data),
-                "clientDataJSON": bytes(assertion.response.client_data),
-                "signature": assertion.response.signature,
-                "user_data": user_data,
-            }
-        )
-
-        headers: dict[str, str] = {"content-type": "application/cbor"}
-        if extra_headers:
-            headers.update(extra_headers)
-
-        try:
-            r = self.session.post(
-                complete_url,
-                verify=self.ssl_verify,
-                headers=headers,
-                data=body,
-                timeout=self.timeout,
-            )
-            r.raise_for_status()
-        except requests.exceptions.RequestException as exc:
-            raise FidoServerError(f"Complete request failed: {exc}") from exc
-
+        body = codec.dumps(codec.assertion_payload(assertion, extra_data))
+        r = self._post(complete_url, "Complete", codec, body, extra_headers, accept_client_error=True)
         self._last_response = r
 
+        if r.status_code >= 400:
+            logger.warning("Authentication rejected with HTTP %s: %s", r.status_code, r.text)
+            return False
+
         try:
-            data = cbor.loads(r.content)
+            data = codec.loads(r.content)
         except Exception as exc:
-            raise FidoServerError(f"Could not decode CBOR complete response: {exc}") from exc
+            raise FidoServerError(f"Could not decode {codec.name} complete response: {exc}") from exc
 
         if not isinstance(data, dict):
-            raise FidoServerError(f"Could not decode CBOR complete response: unexpected type {type(data).__name__}")
+            raise FidoServerError(
+                f"Could not decode {codec.name} complete response: unexpected type {type(data).__name__}"
+            )
 
         logger.debug("COMPLETE RESPONSE: %s", data)
 
@@ -295,3 +263,26 @@ class Fido2HttpClient:
             logger.warning("Authentication failed. Server response: %s", data)
 
         return self.is_authenticated
+
+    def _post(
+        self,
+        url: str,
+        step: str,
+        codec: Codec,
+        body: bytes | None,
+        extra_headers: dict[str, str] | None,
+        accept_client_error: bool = False,
+    ) -> requests.Response:
+        """POST ``body``; a 4xx status is returned instead of raised when ``accept_client_error``."""
+        headers: dict[str, str] = {"content-type": codec.content_type} if body is not None else {}
+        if extra_headers:
+            headers.update(extra_headers)
+        try:
+            r = self.session.post(
+                url, verify=self.ssl_verify, headers=headers, data=body, timeout=self.timeout
+            )
+            if not (accept_client_error and 400 <= r.status_code < 500):
+                r.raise_for_status()
+        except requests.exceptions.RequestException as exc:
+            raise FidoServerError(f"{step} request failed: {exc}") from exc
+        return r

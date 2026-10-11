@@ -7,6 +7,7 @@ from .exceptions import (
     FidoDeviceNotFoundError,
     FidoServerError,
 )
+from .wire import WireFormat
 
 try:
     __version__ = version("fido2client")
@@ -18,4 +19,5 @@ __all__ = [
     "FidoAuthenticationError",
     "FidoDeviceNotFoundError",
     "FidoServerError",
+    "WireFormat",
 ]
