@@ -38,7 +38,7 @@ dev = [
 Homepage = "https://github.com/orglnte/python-fido2-client"
 
 [tool.setuptools.packages.find]
-exclude = ["tests", "tests.*"]
+include = ["fido2client*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
