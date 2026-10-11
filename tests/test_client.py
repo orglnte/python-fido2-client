@@ -30,6 +30,7 @@ MOCK_RP_ID = "example.com"
 MOCK_CHALLENGE = b"\x01\x02\x03\x04" * 8
 FOREIGN_CRED_ID = b"\x09\x0a\x0b\x0c"
 OTHER_FOREIGN_CRED_ID = b"\x0d\x0e\x0f\x10"
+REAL_SESSION = requests.Session
 
 
 def _begin_payload(*credential_ids: bytes, rp_id: str = MOCK_RP_ID) -> dict:
@@ -390,6 +391,27 @@ def test_context_manager_closes_session(session, credential_id):
         client.authenticate_to(MOCK_SERVER, "/begin", "/complete")
 
     session.close.assert_called_once()
+
+
+def test_external_session_replaces_and_closes_own_session(session, credential_id):
+    session.post.side_effect = [
+        _http_response(_begin_payload(credential_id)),
+        _http_response({"status": "OK"}),
+    ]
+    external = MagicMock(spec=REAL_SESSION)
+    external.post.side_effect = [
+        _http_response(_begin_payload(credential_id)),
+        _http_response({"status": "OK"}),
+    ]
+
+    client = Fido2HttpClient()
+    client.authenticate_to(MOCK_SERVER, "/begin", "/complete")
+    client.authenticate_to(MOCK_SERVER, "/begin", "/complete", session=external)
+    client.__exit__(None, None, None)
+
+    session.close.assert_called_once()
+    external.close.assert_not_called()
+    assert client.session is external
 
 
 def test_external_session_reused(credential_id):
