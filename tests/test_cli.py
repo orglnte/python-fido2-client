@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from fido2client import WireFormat
+from fido2client import WireFormat, __version__
 from fido2client.cli import (
     EXIT_AUTHENTICATED,
     EXIT_ERROR,
@@ -94,6 +94,44 @@ def test_login_interrupted(capsys):
         Client.return_value.__enter__.return_value.authenticate_to.side_effect = KeyboardInterrupt
 
         assert main(["login", "http://localhost"]) == EXIT_INTERRUPTED
+
+
+def test_login_unexpected_error_is_not_a_rejection(capsys):
+    with patch("fido2client.cli.Fido2HttpClient") as Client:
+        Client.return_value.__enter__.return_value.authenticate_to.side_effect = RuntimeError("boom")
+
+        exit_code = main(["login", "http://localhost"])
+
+    assert exit_code == EXIT_ERROR
+    assert "error: unexpected RuntimeError: boom" in capsys.readouterr().err
+
+
+def test_login_rejection_with_undecodable_body(capsys):
+    with patch("fido2client.cli.Fido2HttpClient") as Client:
+        client = Client.return_value.__enter__.return_value
+        client.authenticate_to.return_value = False
+        client.get_last_response.return_value = MagicMock(
+            content=b"<html>Unauthorized</html>", text="<html>Unauthorized</html>", status_code=401
+        )
+
+        exit_code = main(["login", "http://localhost"])
+
+    assert exit_code == EXIT_REJECTED
+    assert "Not authenticated (HTTP 401). Server response: <html>Unauthorized</html>" in capsys.readouterr().err
+
+
+def test_login_insecure_warns(authenticator, relying_party, capsys):
+    relying_party.credentials.append(authenticator.create_credential(relying_party.rp_id))
+
+    assert _login(relying_party, "--insecure") == EXIT_AUTHENTICATED
+    assert "warning: TLS certificate verification is disabled" in capsys.readouterr().err
+
+
+def test_version(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        main(["--version"])
+    assert exc_info.value.code == 0
+    assert capsys.readouterr().out.strip() == f"fido2client {__version__}"
 
 
 def test_login_without_device(relying_party, capsys):

@@ -8,9 +8,11 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import traceback
 from collections.abc import Sequence
 from typing import Any
 
+from . import __version__
 from .client import Fido2HttpClient
 from .exceptions import Fido2ClientError
 from .wire import WireFormat
@@ -27,6 +29,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _login(args)
     except KeyboardInterrupt:
         return EXIT_INTERRUPTED
+    except Exception as exc:
+        if args.verbose:
+            traceback.print_exc()
+        _tell(f"error: unexpected {type(exc).__name__}: {exc}")
+        return EXIT_ERROR
 
 
 def _login(args: argparse.Namespace) -> int:
@@ -76,6 +83,7 @@ def _parser() -> argparse.ArgumentParser:
         prog="fido2client",
         description="Log in to a WebAuthn/FIDO2 server with a security key.",
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
     login = commands.add_parser(
         "login",

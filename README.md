@@ -51,7 +51,7 @@ the key has one and the server wants user verification.
 | `-k`, `--insecure` | | skip TLS verification, local development only |
 | `--timeout SECONDS`, `-v` | `30` | HTTP timeout, debug logging |
 
-`python -m fido2client` works the same way.
+`python -m fido2client` works the same way; `fido2client --version` prints the version.
 
 ## From Python
 
